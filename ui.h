@@ -16,10 +16,10 @@ inline void fillPixmap(QPainter* p, const QRectF& r, const QPixmap& pm)
         return;
     }
     QLinearGradient g(r.topLeft(), r.bottomRight());
-    g.setColorAt(0, QColor(0x3a, 0x3a, 0x3a));
-    g.setColorAt(1, QColor(0x22, 0x22, 0x22));
+    g.setColorAt(0, Theme::greyAt(0.169));
+    g.setColorAt(1, Theme::greyAt(0.084));
     p->fillRect(r, g);
-    p->setPen(QColor(0x8a, 0x8a, 0x8a));
+    p->setPen(Theme::greyAt(0.506));
     p->setFont(Theme::font(qMax(8, int(r.height() * 0.42)), QFont::Bold));
     p->drawText(r, Qt::AlignCenter, QString(QChar(0x266A)));
 }
@@ -76,7 +76,7 @@ public:
         setFrameShape(QFrame::NoFrame);
         setWidgetResizable(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        setStyleSheet(QStringLiteral("QScrollArea{background:transparent;border:none;}"));
+        sty(this, QStringLiteral("QScrollArea{background:transparent;border:none;}"));
         viewport()->setAutoFillBackground(false);
         m_anim = new QPropertyAnimation(verticalScrollBar(), "value", this);
         m_anim->setEasingCurve(QEasingCurve::OutCubic);
@@ -315,9 +315,9 @@ private:
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(0, 0, 0, 80));
         p.drawEllipse(pr.translated(0, 2));
-        p.setBrush(Theme::mix(Theme::accent(), QColor(0x1e, 0xd7, 0x60), ph));
+        p.setBrush(Theme::mix(Theme::accent(), Theme::accentHover(), ph));
         p.drawEllipse(pr);
-        p.setBrush(QColor(10, 10, 10));
+        p.setBrush(Theme::onAccent());
         const QPointF c = pr.center();
         const qreal k = pr.width();
         if (m_current && m_playing) {
@@ -336,7 +336,7 @@ private:
     void paintCard(QPainter& p, const QRectF& r, qreal hov)
     {
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, int(26 * hov)));
+        p.setBrush(Theme::fgA(int(26 * hov)));
         p.drawRoundedRect(r, 8, 8);
 
         const QRectF cr(r.left() + 12, r.top() + 12, CardW - 24, CardW - 24);
@@ -344,7 +344,7 @@ private:
 
         if (m_skel) {
             const int a = int(14 + 14 * pulse());
-            p.setBrush(QColor(255, 255, 255, a));
+            p.setBrush(Theme::fgA(a));
             p.drawRoundedRect(cr, 6, 6);
             p.drawRoundedRect(QRectF(tx, cr.bottom() + 16, tw * 0.8, 12), 6, 6);
             p.drawRoundedRect(QRectF(tx, cr.bottom() + 38, tw * 0.55, 10), 5, 5);
@@ -360,7 +360,7 @@ private:
 
         const QFont tf = Theme::font(15, QFont::DemiBold), sf = Theme::font(13);
         p.setFont(tf);
-        p.setPen(m_current ? Theme::accent() : QColor(Qt::white));
+        p.setPen(m_current ? Theme::accent() : Theme::fg());
         p.drawText(QRectF(tx, cr.bottom() + 10, tw, 22), int(Qt::AlignLeft | Qt::AlignVCenter),
                    QFontMetrics(tf).elidedText(m_title, Qt::ElideRight, int(tw)));
         p.setFont(sf);
@@ -375,7 +375,7 @@ private:
         QPainterPath tile;
         tile.addRoundedRect(r, 6, 6);
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, int(26 + 26 * hov)));
+        p.setBrush(Theme::fgA(int(26 + 26 * hov)));
         p.drawPath(tile);
 
         const QRectF art(r.left(), r.top(), TileH, TileH);
@@ -387,7 +387,7 @@ private:
         const qreal tw = r.width() - (tx - r.left()) - 14 - 40 - 8;      // leave room for the play button
         const QFont tf = Theme::font(14, QFont::DemiBold);
         p.setFont(tf);
-        p.setPen(m_current ? Theme::accent() : QColor(Qt::white));
+        p.setPen(m_current ? Theme::accent() : Theme::fg());
         p.drawText(QRectF(tx, r.top(), qMax<qreal>(10, tw), r.height()), int(Qt::AlignLeft | Qt::AlignVCenter),
                    QFontMetrics(tf).elidedText(m_title, Qt::ElideRight, int(qMax<qreal>(10, tw))));
         paintPlay(p, hov);
@@ -396,7 +396,7 @@ private:
     void paintHero(QPainter& p, const QRectF& r, qreal hov)
     {
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, int(18 + 20 * hov)));
+        p.setBrush(Theme::fgA(int(18 + 20 * hov)));
         p.drawRoundedRect(r, 10, 10);
 
         const QRectF cr(r.left() + 22, r.top() + 22, 96, 96);
@@ -405,7 +405,7 @@ private:
 
         const QFont tf = Theme::font(30, QFont::Bold);
         p.setFont(tf);
-        p.setPen(m_current ? Theme::accent() : QColor(Qt::white));
+        p.setPen(m_current ? Theme::accent() : Theme::fg());
         p.drawText(QRectF(tx, cr.bottom() + 12, tw, 42), int(Qt::AlignLeft | Qt::AlignVCenter),
                    QFontMetrics(tf).elidedText(m_title, Qt::ElideRight, int(tw)));
 
@@ -424,7 +424,7 @@ private:
         }
         const QFont sf = Theme::font(14, QFont::Medium);
         p.setFont(sf);
-        p.setPen(QColor(255, 255, 255, 200));
+        p.setPen(QColor(255, 255, 255, 200));   // sits on the dark cover scrim: always light
         p.drawText(QRectF(x, y, qMax<qreal>(10, tx + tw - x - 64), 24), int(Qt::AlignLeft | Qt::AlignVCenter),
                    QFontMetrics(sf).elidedText(m_sub, Qt::ElideRight, int(qMax<qreal>(10, tx + tw - x - 64))));
         paintPlay(p, hov);
@@ -459,12 +459,12 @@ public:
     {
         setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         m_title = new QLabel(title, this);
-        m_title->setStyleSheet(QStringLiteral("font-size:24px;font-weight:800;color:white;background:transparent;"));
+        sty(m_title, QStringLiteral("font-size:24px;font-weight:800;color:white;background:transparent;"));
         m_all = new QPushButton(QStringLiteral("Show all"), this);
         m_all->setCursor(Qt::PointingHandCursor);
         m_all->setFocusPolicy(Qt::NoFocus);
         m_all->setFlat(true);
-        m_all->setStyleSheet(QStringLiteral(
+        sty(m_all, QStringLiteral(
             "QPushButton{background:transparent;border:none;color:#b3b3b3;font-size:13px;font-weight:700;padding:4px 12px;}"
             "QPushButton:hover{color:white;text-decoration:underline;}"));
         m_all->hide();
@@ -709,11 +709,11 @@ protected:
 
         const qreal hv = m_hover.value(), dr = m_drop.value();
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, int(24 * hv) + (m_selected ? 16 : 0)));
+        p.setBrush(Theme::fgA(int(24 * hv) + (m_selected ? 16 : 0)));
         p.drawRoundedRect(r, 8, 8);
         if (dr > 0.01) {
-            p.setBrush(QColor(0x1d, 0xb9, 0x54, int(50 * dr)));
-            p.setPen(QPen(QColor(0x1d, 0xb9, 0x54, int(255 * dr)), 2));
+            p.setBrush(Theme::accentA(int(50 * dr)));
+            p.setPen(QPen(Theme::accentA(int(255 * dr)), 2));
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 8, 8);
         }
 
@@ -722,7 +722,7 @@ protected:
 
         const qreal tx = cov.right() + 12, tw = r.right() - 8 - tx;
         const QFont nf = Theme::font(15, QFont::Medium), sf = Theme::font(13);
-        p.setPen(m_playingFrom ? Theme::accent() : QColor(Qt::white));
+        p.setPen(m_playingFrom ? Theme::accent() : Theme::fg());
         p.setFont(nf);
         p.drawText(QRectF(tx, r.top() + 9, tw, 21), int(Qt::AlignLeft | Qt::AlignVCenter),
                    QFontMetrics(nf).elidedText(m_name, Qt::ElideRight, int(tw)));
@@ -818,7 +818,7 @@ protected:
         p.drawRoundedRect(r.translated(0, 2), 23, 23);
         p.setBrush(Theme::accent());
         p.drawRoundedRect(r, 23, 23);
-        p.setPen(QColor(10, 10, 10));
+        p.setPen(Theme::onAccent());
         p.setFont(Theme::font(14, QFont::DemiBold));
         p.drawText(r, Qt::AlignCenter, QFontMetrics(Theme::font(14, QFont::DemiBold))
                                            .elidedText(m_text, Qt::ElideRight, int(r.width()) - 24));
@@ -851,8 +851,8 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(QPen(QColor(255, 255, 255, 26), 1));
-        p.setBrush(QColor(0x28, 0x28, 0x28));
+        p.setPen(QPen(Theme::fgA(26), 1));
+        p.setBrush(Theme::greyAt(0.093));
         p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 14, 14);
     }
 
@@ -884,14 +884,14 @@ private:
         v->setSpacing(14);
 
         auto* h = new QLabel(heading);
-        h->setStyleSheet(QStringLiteral("font-size:22px;font-weight:800;color:white;background:transparent;"));
+        sty(h, QStringLiteral("font-size:22px;font-weight:800;color:white;background:transparent;"));
         v->addWidget(h);
 
         m_edit = new QLineEdit(initial);
         m_edit->setMaxLength(80);
         m_edit->setFixedHeight(46);
         m_edit->setPlaceholderText(QStringLiteral("Playlist name"));
-        m_edit->setStyleSheet(QStringLiteral(
+        sty(m_edit, QStringLiteral(
             "QLineEdit{background:rgba(255,255,255,0.10);border:1px solid transparent;border-radius:8px;"
             "padding:0 14px;color:white;font-size:15px;selection-background-color:#1DB954;}"
             "QLineEdit:hover{background:rgba(255,255,255,0.14);}"
@@ -911,10 +911,10 @@ private:
         }
         cancel->setFixedHeight(42);
         ok->setFixedHeight(42);
-        cancel->setStyleSheet(QStringLiteral(
+        sty(cancel, QStringLiteral(
             "QPushButton{background:transparent;color:#b3b3b3;border:none;padding:0 20px;font-size:14px;font-weight:700;}"
             "QPushButton:hover{color:white;}"));
-        ok->setStyleSheet(QStringLiteral(
+        sty(ok, QStringLiteral(
             "QPushButton{background:#1DB954;color:black;border:none;border-radius:21px;padding:0 28px;font-size:14px;font-weight:700;}"
             "QPushButton:hover{background:#1ed760;}QPushButton:pressed{background:#169c46;}"
             "QPushButton:disabled{background:rgba(255,255,255,0.12);color:#777;}"));
@@ -970,7 +970,7 @@ protected:
         const qreal hot = m_hover.value();
 
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, int(30 * hot)));
+        p.setBrush(Theme::fgA(int(30 * hot)));
         p.drawEllipse(QRectF(0, 0, d, d));
 
         const QRectF r(4, 4, d - 8, d - 8);
@@ -992,13 +992,13 @@ protected:
             f.setBold(true);
             f.setPixelSize(int(d * 0.42));
             p.setFont(f);
-            p.setPen(QColor(10, 10, 10));
+            p.setPen(Theme::onAccent());
             const QString t = m_name.trimmed().left(1).toUpper();
             p.drawText(r, Qt::AlignCenter, t.isEmpty() ? QStringLiteral("?") : t);
         } else {
-            p.fillRect(r, QColor(0x2e, 0x2e, 0x2e));
+            p.fillRect(r, Theme::greyAt(0.12));
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(0xb3, 0xb3, 0xb3));
+            p.setBrush(Theme::subtext());
             const QPointF c = r.center();
             p.drawEllipse(QPointF(c.x(), c.y() - r.height() * 0.14), r.width() * 0.21, r.width() * 0.21);
             p.drawEllipse(QPointF(c.x(), c.y() + r.height() * 0.56), r.width() * 0.42, r.height() * 0.36);
@@ -1006,7 +1006,7 @@ protected:
         p.restore();
 
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(QColor(255, 255, 255, int(60 + 150 * hot)), 1.2));
+        p.setPen(QPen(Theme::fgA(int(60 + 150 * hot)), 1.2));
         p.drawEllipse(r);
     }
 

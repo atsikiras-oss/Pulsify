@@ -1,6 +1,7 @@
 #pragma once
 #include <QtWidgets>
 #include <functional>
+#include "library.h"
 #include "google.h"
 #include "online.h"
 
@@ -18,12 +19,17 @@ inline QString pulseDialogStyle()
     return QStringLiteral(
         "QDialog{background:#282828;}"
         "QLabel{color:white;background:transparent;font-size:13px;}"
-        "QTabWidget::pane{border:none;top:8px;}"
-        "QTabBar{background:transparent;}"
-        "QTabBar::tab{background:rgba(255,255,255,0.09);color:white;padding:8px 18px;border-radius:16px;"
-        "margin-right:8px;font-size:13px;font-weight:600;}"
-        "QTabBar::tab:hover{background:rgba(255,255,255,0.16);}"
-        "QTabBar::tab:selected{background:white;color:black;}"
+        "QPushButton#pill{background:rgba(255,255,255,0.09);color:white;border-radius:16px;padding:0 18px;"
+        "min-height:32px;font-size:13px;font-weight:600;}"
+        "QPushButton#pill:hover{background:rgba(255,255,255,0.16);}"
+        "QPushButton#pill:checked{background:white;color:black;}"
+        "QCheckBox{color:white;font-size:13px;spacing:10px;background:transparent;}"
+        "QCheckBox::indicator{width:18px;height:18px;border:1px solid #8a8a8a;border-radius:5px;}"
+        "QCheckBox::indicator:checked{background:#1DB954;border-color:#1DB954;}"
+        "QSlider::groove:horizontal{height:4px;background:rgba(255,255,255,0.22);border-radius:2px;}"
+        "QSlider::sub-page:horizontal{background:#1DB954;border-radius:2px;}"
+        "QSlider::handle:horizontal{background:white;width:14px;height:14px;margin:-5px 0;border-radius:7px;}"
+        "QScrollArea{background:transparent;border:none;}"
         "QListWidget{background:rgba(255,255,255,0.05);border:none;border-radius:10px;color:white;"
         "font-size:14px;outline:none;padding:4px;}"
         "QListWidget::item{padding:9px 8px;border-radius:6px;}"
@@ -52,14 +58,14 @@ public:
     {
         setWindowTitle(QStringLiteral("Google setup"));
         setMinimumWidth(580);
-        setStyleSheet(pulseDialogStyle());
+        sty(this, pulseDialogStyle());
 
         auto* v = new QVBoxLayout(this);
         v->setContentsMargins(26, 24, 26, 20);
         v->setSpacing(12);
 
         auto* h = new QLabel(QStringLiteral("Connect your own Google project"));
-        h->setStyleSheet(QStringLiteral("font-size:22px;font-weight:800;color:white;background:transparent;"));
+        sty(h, QStringLiteral("font-size:22px;font-weight:800;color:white;background:transparent;"));
         v->addWidget(h);
 
         auto* info = new QLabel(QStringLiteral(
@@ -151,20 +157,39 @@ public:
         setWindowTitle(QStringLiteral("Import playlists"));
         setMinimumSize(560, 580);
         resize(620, 640);
-        setStyleSheet(pulseDialogStyle());
+        sty(this, pulseDialogStyle());
 
         auto* v = new QVBoxLayout(this);
         v->setContentsMargins(26, 24, 26, 20);
         v->setSpacing(10);
         auto* h = new QLabel(QStringLiteral("Import from YouTube"));
-        h->setStyleSheet(QStringLiteral("font-size:24px;font-weight:800;color:white;background:transparent;"));
+        sty(h, QStringLiteral("font-size:24px;font-weight:800;color:white;background:transparent;"));
         v->addWidget(h);
 
-        auto* tabs = new QTabWidget;
-        tabs->setDocumentMode(true);
-        tabs->addTab(buildAccountTab(), QStringLiteral("Google account"));
-        tabs->addTab(buildLinkTab(), QStringLiteral("From link"));
-        v->addWidget(tabs, 1);
+        auto* pills = new QHBoxLayout;
+        pills->setSpacing(8);
+        auto* pages = new QStackedWidget;
+        auto* group = new QButtonGroup(this);
+        const QStringList names = { QStringLiteral("Google account"), QStringLiteral("From link") };
+        const QList<QWidget*> tabPages = { buildAccountTab(), buildLinkTab() };
+        for (int i = 0; i < names.size(); ++i) {
+            auto* b = new QPushButton(names[i]);
+            b->setObjectName(QStringLiteral("pill"));
+            b->setCheckable(true);
+            b->setChecked(i == 0);
+            b->setAutoDefault(false);
+            b->setFocusPolicy(Qt::NoFocus);
+            b->setCursor(Qt::PointingHandCursor);
+            group->addButton(b, i);
+            pills->addWidget(b);
+            pages->addWidget(tabPages[i]);
+        }
+        pills->addStretch(1);
+        v->addSpacing(2);
+        v->addLayout(pills);
+        v->addSpacing(6);
+        v->addWidget(pages, 1);
+        connect(group, &QButtonGroup::idClicked, pages, &QStackedWidget::setCurrentIndex);
 
         m_result = new QLabel;
         m_result->setWordWrap(true);
@@ -284,7 +309,7 @@ private:
 
     void showAccountMsg(const QString& text, bool error)
     {
-        m_accMsg->setStyleSheet(QStringLiteral("color:%1;font-size:13px;background:transparent;")
+        sty(m_accMsg, QStringLiteral("color:%1;font-size:13px;background:transparent;")
                                     .arg(error ? "#ff8a8a" : "#c8c8c8"));
         m_accMsg->setText(text);
         m_accMsg->setVisible(!text.isEmpty());
@@ -449,7 +474,7 @@ private:
 
     void showLinkMsg(const QString& text, bool error)
     {
-        m_linkMsg->setStyleSheet(QStringLiteral("color:%1;font-size:13px;background:transparent;")
+        sty(m_linkMsg, QStringLiteral("color:%1;font-size:13px;background:transparent;")
                                      .arg(error ? "#ff8a8a" : "#c8c8c8"));
         m_linkMsg->setText(text);
         m_linkMsg->setVisible(!text.isEmpty());
@@ -487,7 +512,7 @@ private:
 
     void showResult(const QString& text)
     {
-        m_result->setStyleSheet(QStringLiteral("color:#1ed760;font-size:13px;background:transparent;"));
+        sty(m_result, QStringLiteral("color:#1ed760;font-size:13px;background:transparent;"));
         m_result->setText(text);
         m_result->setVisible(!text.isEmpty());
     }
@@ -513,4 +538,179 @@ private:
     QLabel*       m_linkMsg = nullptr;
     QString       m_linkId;
     quint64       m_linkTok = 0;
+};
+
+
+// ============================================================================
+//  Importer: handles multiple input formats for the new ImportDialog (dialogs.h).
+//  Accepts YouTube playlist links, plain-text "Artist - Title" lists, and CSV/text
+//  exports from Exportify, TuneMyMusic, Soundiiz (covers Spotify, Apple Music, etc.)
+// ============================================================================
+
+inline QVector<QStringList> parseCsvRows(const QString& text, QChar delim)
+{
+    QVector<QStringList> rows;
+    QStringList row;
+    QString cell;
+    bool inQ = false;
+    const QChar quote(QLatin1Char('"'));
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar c = text.at(i);
+        if (inQ) {
+            if (c == quote) {
+                if (i + 1 < text.size() && text.at(i + 1) == quote) { cell += quote; ++i; }
+                else inQ = false;
+            } else { cell += c; }
+        } else if (c == quote) { inQ = true; }
+        else if (c == delim) { row << cell; cell.clear(); }
+        else if (c == QLatin1Char('\n') || c == QLatin1Char('\r')) {
+            if (c == QLatin1Char('\r') && i + 1 < text.size() && text.at(i + 1) == QLatin1Char('\n')) ++i;
+            row << cell; cell.clear();
+            if (!(row.size() == 1 && row.first().trimmed().isEmpty())) rows << row;
+            row.clear();
+        } else { cell += c; }
+    }
+    if (!cell.isEmpty() || !row.isEmpty()) { row << cell; rows << row; }
+    return rows;
+}
+
+inline qint64 parseDurCell(const QString& raw)
+{
+    const QString s = raw.trimmed();
+    if (s.isEmpty()) return 0;
+    if (s.contains(QLatin1Char(':'))) {
+        const QStringList p = s.split(QLatin1Char(':'));
+        qint64 sec = 0;
+        for (const QString& part : p) sec = sec * 60 + part.toLongLong();
+        return sec * 1000;
+    }
+    bool ok = false;
+    const double v = s.toDouble(&ok);
+    if (!ok || v <= 0) return 0;
+    return v > 10000 ? qint64(v) : qint64(v * 1000.0);
+}
+
+class Importer : public QObject
+{
+    Q_OBJECT
+public:
+    explicit Importer(QObject* parent = nullptr) : QObject(parent) {}
+
+    void start(const QString& input)
+    {
+        const QString text = input.trimmed();
+        if (QFileInfo::exists(text)) { loadFile(text); return; }
+        const QString pid = YtDlp::playlistIdFromLink(text);
+        if (!pid.isEmpty()) { importYt(pid); return; }
+        importLines(text);
+    }
+
+    void cancel() { m_cancelled = true; if (m_yt) m_yt->cancelImport(); }
+
+signals:
+    void progress(const QString& status);
+    void finished(bool ok, const QString& name, const QVector<Track>& tracks, const QString& msg);
+
+private:
+    static int nextId() { static int g = 20000000; return ++g; }
+
+    void loadFile(const QString& path)
+    {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            emit finished(false, QString(), {}, QStringLiteral("Couldn't open file: ") + path);
+            return;
+        }
+        const QString text = QString::fromUtf8(f.readAll());
+        QVector<Track> tracks = parseCsvTracks(text);
+        if (!tracks.isEmpty()) { emit finished(true, QFileInfo(path).baseName(), tracks, QString()); return; }
+        importLines(text);
+    }
+
+    QVector<Track> parseCsvTracks(const QString& text)
+    {
+        const QChar delim = text.count(QLatin1Char('\t')) > text.count(QLatin1Char(','))
+                            ? QLatin1Char('\t') : QLatin1Char(',');
+        const QVector<QStringList> rows = parseCsvRows(text, delim);
+        if (rows.size() < 2) return {};
+        const QStringList& hdr = rows[0];
+        int colTitle = -1, colArtist = -1, colAlbum = -1, colDur = -1;
+        for (int i = 0; i < hdr.size(); ++i) {
+            const QString h = hdr[i].toLower().trimmed();
+            if (h.contains(QLatin1String("title")) || h.contains(QLatin1String("track name")))
+                if (colTitle < 0) colTitle = i;
+            if (h.contains(QLatin1String("artist")) && colArtist < 0) colArtist = i;
+            if (h.contains(QLatin1String("album")) && colAlbum < 0) colAlbum = i;
+            if (h.contains(QLatin1String("duration")) && colDur < 0) colDur = i;
+        }
+        if (colTitle < 0 || colArtist < 0) return {};
+        QVector<Track> out;
+        for (int r = 1; r < rows.size(); ++r) {
+            const QStringList& row = rows[r];
+            auto col = [&](int i) -> QString { return (i >= 0 && i < row.size()) ? row[i].trimmed() : QString(); };
+            if (col(colTitle).isEmpty()) continue;
+            Track t;
+            t.id = nextId();
+            t.title = col(colTitle);
+            t.artist = col(colArtist);
+            if (colAlbum >= 0) t.album = col(colAlbum);
+            if (colDur >= 0) t.durationMs = parseDurCell(col(colDur));
+            t.query = (t.artist + QLatin1Char(' ') + t.title).trimmed();
+            t.locked = true;
+            out.push_back(t);
+        }
+        return out;
+    }
+
+    void importLines(const QString& text)
+    {
+        static const QRegularExpression sep(QStringLiteral(R"(^(.{1,80}?)\s*[-\u2013\u2014]\s*(.+)$)"));
+        QVector<Track> tracks;
+        for (const QString& raw : text.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            const QString line = raw.trimmed();
+            if (line.isEmpty() || line.startsWith(QLatin1Char('#'))) continue;
+            Track t;
+            t.id = nextId();
+            const QRegularExpressionMatch m = sep.match(line);
+            if (m.hasMatch()) { t.artist = m.captured(1).trimmed(); t.title = m.captured(2).trimmed(); }
+            else t.title = line;
+            t.query = (t.artist + QLatin1Char(' ') + t.title).trimmed();
+            tracks.push_back(t);
+        }
+        if (tracks.isEmpty()) {
+            emit finished(false, QString(), {}, QStringLiteral("No songs found. Paste one per line (Artist - Title) or choose a CSV."));
+            return;
+        }
+        emit finished(true, QStringLiteral("Imported songs"), tracks,
+            QStringLiteral("%1 song%2 imported.").arg(tracks.size()).arg(tracks.size() == 1 ? "" : "s"));
+    }
+
+    void importYt(const QString& playlistId)
+    {
+        emit progress(QStringLiteral("Importing from YouTube\u2026"));
+        m_yt = new YtDlp(this);
+        const quint64 tok = m_yt->importPlaylist(playlistId);
+        connect(m_yt, &YtDlp::playlistImported, this,
+            [this, tok](quint64 t, const QString& name, const QVector<OnlineItem>& items, const QString& err) {
+            if (t != tok || m_cancelled) return;
+            if (!err.isEmpty()) { emit finished(false, name, {}, err); return; }
+            QVector<Track> tracks;
+            for (const OnlineItem& it : items) {
+                Track tr;
+                tr.id = nextId();
+                tr.online = true;
+                tr.videoId = it.id;
+                tr.title = it.title;
+                tr.artist = it.artist;
+                tr.album = it.album;
+                tr.durationMs = it.durationMs;
+                tr.thumbUrl = it.thumbUrl;
+                tracks.push_back(tr);
+            }
+            emit finished(true, name, tracks, QString());
+        });
+    }
+
+    bool    m_cancelled = false;
+    YtDlp*  m_yt = nullptr;
 };

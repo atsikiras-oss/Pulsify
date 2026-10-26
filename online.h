@@ -1,10 +1,11 @@
 #pragma once
 #include <QtWidgets>
 #include <QtNetwork>
+#include <functional>
 #include <memory>
 #include <QQueue>
 #ifdef Q_OS_WIN
-#  include <windows.h>
+#  include <QtCore/qt_windows.h>
 #endif
 
 // ============================================================================
@@ -15,12 +16,18 @@
 //  audio URL which QMediaPlayer then streams. Pulsify can download yt-dlp itself.
 // ============================================================================
 
+// Tiny JSON accessors (a bare const char* key is ambiguous between overloads in Qt 6).
+inline QString     jstr(const QJsonObject& o, const char* k) { return o.value(QLatin1String(k)).toString(); }
+inline QJsonObject jobj(const QJsonObject& o, const char* k) { return o.value(QLatin1String(k)).toObject(); }
+inline QJsonArray  jarr(const QJsonObject& o, const char* k) { return o.value(QLatin1String(k)).toArray(); }
+inline double      jnum(const QJsonObject& o, const char* k) { return o.value(QLatin1String(k)).toDouble(); }
+
 // What yt-dlp told us about the audio stream itself (only filled in by a stream resolve).
 struct StreamInfo {
     QString container, codec, channel, uploadDate, webUrl;   // "m4a", "mp4a.40.2", ...
     int     bitrateKbps = 0, sampleRate = 0;
     qint64  views = 0;
-    QVector<QPair<QByteArray, QByteArray>> headers;          // headers the stream URL wants
+    QVector<QPair<QByteArray, QByteArray>> headers;          // HTTP headers the stream URL needs (for relay)
     bool    known() const { return !container.isEmpty() || !codec.isEmpty() || bitrateKbps > 0; }
 };
 
@@ -32,6 +39,116 @@ struct OnlineItem {
 };
 
 namespace Yt {
+
+// GUI apps (especially on macOS) often don't see the shell's PATH.
+inline QStringList extraBinDirs()
+{
+    QStringList d;
+    d << QStringLiteral("/opt/homebrew/bin")
+      << QStringLiteral("/usr/local/bin")
+      << QDir::homePath() + QStringLiteral("/.local/bin")
+      << QDir::homePath() + QStringLiteral("/.deno/bin")
+      << QDir::homePath() + QStringLiteral("/.bun/bin");
+#ifdef Q_OS_WIN
+    d << QDir::homePath() + QStringLiteral("/AppData/Local/Microsoft/WinGet/Links")
+      << QStringLiteral("C:/Program Files/nodejs");
+#endif
+    return d;
+}
+
+inline QString findExe(const QString& name)
+{
+    QString p = QStandardPaths::findExecutable(name);
+    if (p.isEmpty()) p = QStandardPaths::findExecutable(name, extraBinDirs());
+    return p;
+}
+
+inline QString dataDir()
+{
+    const QString d = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(d);
+    return d;
+}
+
+inline QString cacheDir(const QString& sub)
+{
+    const QString d = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QLatin1Char('/') + sub;
+    QDir().mkpath(d);
+    return d;
+}
+
+// Where the in-app installer puts yt-dlp.
+inline QString managedPath()
+{
+    return dataDir() + QStringLiteral("/bin/") +
+#ifdef Q_OS_WIN
+        QStringLiteral("yt-dlp.exe");
+#else
+        QStringLiteral("yt-dlp");
+#endif
+}
+
+inline QString findYtDlp()
+{
+    QSettings s;
+    const QString custom = s.value(QStringLiteral("yt/path")).toString();
+    if (!custom.isEmpty() && QFileInfo::exists(custom)) return custom;
+    if (QFileInfo::exists(managedPath())) return managedPath();
+    const QString beside = QCoreApplication::applicationDirPath() + QLatin1Char('/')
+#ifdef Q_OS_WIN
+        + QStringLiteral("yt-dlp.exe");
+#else
+        + QStringLiteral("yt-dlp");
+#endif
+    if (QFileInfo::exists(beside)) return beside;
+    return findExe(QStringLiteral("yt-dlp"));
+}
+
+// yt-dlp needs an external JavaScript runtime for reliable YouTube support.
+// Returns {runtime name, path}; empty when none is installed.
+inline QPair<QString, QString> jsRuntime()
+{
+    static const char* names[] = { "deno", "node", "bun", "qjs" };
+    for (const char* n : names) {
+        const QString p = findExe(QString::fromLatin1(n));
+        if (p.isEmpty()) continue;
+        const QString nm = QString::fromLatin1(n);
+        return qMakePair(nm == QLatin1String("qjs") ? QStringLiteral("quickjs") : nm, p);
+    }
+    return qMakePair(QString(), QString());
+}
+
+inline QStringList baseArgs()
+{
+    QSettings s;
+    QStringList a;
+    a << QStringLiteral("--ignore-config") << QStringLiteral("--no-warnings")
+      << QStringLiteral("--socket-timeout") << QStringLiteral("20")
+      << QStringLiteral("--retries") << QStringLiteral("3");
+    const QPair<QString, QString> js = jsRuntime();
+    if (!js.first.isEmpty())
+        a << QStringLiteral("--js-runtimes") << js.first + QLatin1Char(':') + js.second;
+    const QString browser = s.value(QStringLiteral("yt/cookies")).toString();
+    if (!browser.isEmpty())
+        a << QStringLiteral("--cookies-from-browser") << browser;
+    return a;
+}
+
+inline void pruneAudioCache()
+{
+    QDir d(cacheDir(QStringLiteral("audio")));
+    const QDateTime cutoff = QDateTime::currentDateTime().addDays(-3);
+    const QFileInfoList files = d.entryInfoList(QDir::Files);
+    for (const QFileInfo& fi : files)
+        if (fi.lastModified() < cutoff) QFile::remove(fi.absoluteFilePath());
+}
+
+inline void clearAudioCache()
+{
+    QDir d(cacheDir(QStringLiteral("audio")));
+    const QFileInfoList files = d.entryInfoList(QDir::Files);
+    for (const QFileInfo& fi : files) QFile::remove(fi.absoluteFilePath());
+}
 
 inline bool validId(const QString& s)
 {
@@ -164,23 +281,31 @@ inline OnlineItem fromStored(const QJsonObject& o)
 }
 
 // Last meaningful line of yt-dlp's stderr, made human-friendly.
-inline QString friendlyError(const QString& stderrText)
+inline QString friendlyError(const QString& raw)
 {
-    QString line;
-    for (const QString& l : stderrText.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
-        const QString t = l.trimmed();
-        if (t.startsWith(QLatin1String("ERROR"))) line = t;
-        else if (line.isEmpty() && !t.startsWith(QLatin1String("WARNING"))) line = t;
-    }
-    if (line.isEmpty()) return QStringLiteral("yt-dlp failed without a message");
-    line.remove(QRegularExpression(QStringLiteral(R"(^ERROR:\s*)")));
-    line.remove(QRegularExpression(QStringLiteral(R"(^\[[\w:]+\]\s*[\w-]{11}:\s*)")));
-    if (line.contains(QStringLiteral("Sign in to confirm"), Qt::CaseInsensitive))
+    if (raw.trimmed().isEmpty()) return QStringLiteral("Something went wrong while talking to yt-dlp");
+    const QString r = raw.toLower();
+    auto has = [&r](const char* s) { return r.contains(QLatin1String(s)); };
+    if (has("sign in to confirm") || has("not a bot"))
+        return QStringLiteral("YouTube wants a sign-in check \u2013 pick a browser under \u201cUse cookies from\u201d in Settings");
+    if (has("requested format is not available"))
+        return QStringLiteral("No playable audio format \u2013 update yt-dlp and install a JavaScript runtime (Settings)");
+    if (has("private video") || has("video unavailable") || has("this video is not available")
+        || has("has been removed") || has("this video is no longer available"))
+        return QStringLiteral("This video isn\u2019t available");
+    if (has("403"))
+        return QStringLiteral("YouTube refused the stream (403) \u2013 try updating yt-dlp in Settings");
+    if (has("was not found") || has("couldn't start"))
+        return QStringLiteral("yt-dlp isn\u2019t installed \u2013 open Settings to get it");
+    // Legacy messages
+    if (raw.contains(QStringLiteral("Sign in to confirm"), Qt::CaseInsensitive))
         return QStringLiteral("YouTube wants a sign-in / bot check. Updating yt-dlp usually fixes this.");
-    if (line.contains(QStringLiteral("Video unavailable"), Qt::CaseInsensitive))
+    if (raw.contains(QStringLiteral("Video unavailable"), Qt::CaseInsensitive))
         return QStringLiteral("This video is unavailable.");
-    if (line.contains(QStringLiteral("not available in your country"), Qt::CaseInsensitive))
+    if (raw.contains(QStringLiteral("not available in your country"), Qt::CaseInsensitive))
         return QStringLiteral("This video is blocked in your country.");
+    QString line = raw.trimmed();
+    line.remove(QRegularExpression(QStringLiteral(R"(^ERROR:\s*)")));
     if (line.size() > 180) line = line.left(177) + QStringLiteral("...");
     return line;
 }
@@ -517,8 +642,8 @@ private:
             return tok;
         }
 
-        // Plain https m4a (AAC) first: every Qt multimedia backend can demux it, and it can be fetched with
-        // range requests.  HLS / DASH-fragment formats are last resorts; they are what breaks mid-song.
+        // Plain https m4a (AAC) first: every Qt multimedia backend can demux it, and range
+        // requests against it allow the StreamRelay to work reliably.
         QProcess* p = spawn({ QStringLiteral("-f"),
                               QStringLiteral("bestaudio[ext=m4a][protocol=https]/bestaudio[protocol=https]/"
                                              "bestaudio[ext=m4a]/bestaudio/best"),
@@ -569,15 +694,15 @@ private:
             }
             OnlineItem meta = Yt::fromJson(o);
             StreamInfo& si = meta.stream;
-            si.container  = o.value(QLatin1String("ext")).toString();
-            si.codec      = o.value(QLatin1String("acodec")).toString();
+            si.container   = o.value(QLatin1String("ext")).toString();
+            si.codec       = o.value(QLatin1String("acodec")).toString();
             si.bitrateKbps = int(o.value(QLatin1String("abr")).toDouble() + 0.5);
-            si.sampleRate = o.value(QLatin1String("asr")).toInt();
-            si.views      = qint64(o.value(QLatin1String("view_count")).toDouble());
-            si.uploadDate = o.value(QLatin1String("upload_date")).toString();
-            si.channel    = o.value(QLatin1String("channel")).toString();
+            si.sampleRate  = o.value(QLatin1String("asr")).toInt();
+            si.views       = qint64(o.value(QLatin1String("view_count")).toDouble());
+            si.uploadDate  = o.value(QLatin1String("upload_date")).toString();
+            si.channel     = o.value(QLatin1String("channel")).toString();
             if (si.channel.isEmpty()) si.channel = o.value(QLatin1String("uploader")).toString();
-            si.webUrl     = o.value(QLatin1String("webpage_url")).toString();
+            si.webUrl      = o.value(QLatin1String("webpage_url")).toString();
             const QJsonObject hh = o.value(QLatin1String("http_headers")).toObject();
             for (auto it = hh.begin(); it != hh.end(); ++it)
                 si.headers.push_back({ it.key().toUtf8(), it.value().toString().toUtf8() });
@@ -657,6 +782,10 @@ private:
         QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
         env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
         env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
+        // Augment PATH so GUI apps find yt-dlp and JS runtimes in common install locations
+        QString path = env.value(QStringLiteral("PATH"));
+        for (const QString& d : Yt::extraBinDirs()) path += QString(QDir::listSeparator()) + d;
+        env.insert(QStringLiteral("PATH"), path);
 #ifdef Q_OS_MACOS
         env.insert(QStringLiteral("PATH"), env.value(QStringLiteral("PATH"))
                    + QStringLiteral(":/opt/homebrew/bin:/usr/local/bin"));
@@ -682,6 +811,108 @@ private:
     QSet<QProcess*>  m_fetchProcs;
     int m_fetchActive = 0;
     int m_fetchEpoch = 0;
+};
+
+// ============================================================================
+//  YtJob: one fire-and-forget yt-dlp process. Emits stdout line by line.
+//  Deletes itself when finished. abort() silences it and kills the process.
+// ============================================================================
+class YtJob : public QObject
+{
+    Q_OBJECT
+public:
+    explicit YtJob(QObject* parent = nullptr) : QObject(parent)
+    {
+        m_p.setProcessChannelMode(QProcess::SeparateChannels);
+#ifdef Q_OS_WIN
+        m_p.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* a) {
+            a->flags |= CREATE_NO_WINDOW;
+        });
+#endif
+        connect(&m_p, &QProcess::readyReadStandardOutput, this, [this] { drain(false); });
+        connect(&m_p, &QProcess::readyReadStandardError, this, [this] { m_err += m_p.readAllStandardError(); });
+        connect(&m_p, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
+            if (e == QProcess::FailedToStart) finish(false, QStringLiteral("Couldn't start yt-dlp"));
+        });
+        connect(&m_p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                [this](int code, QProcess::ExitStatus st) {
+            drain(true);
+            m_err += m_p.readAllStandardError();
+            finish(code == 0 && st == QProcess::NormalExit, errorText());
+        });
+    }
+
+    // program: leave empty to use the located yt-dlp.
+    void start(const QStringList& args, const QString& program = QString())
+    {
+        const QString exe = program.isEmpty() ? Yt::findYtDlp() : program;
+        if (exe.isEmpty()) {
+            QTimer::singleShot(0, this, [this] { finish(false, QStringLiteral("yt-dlp was not found")); });
+            return;
+        }
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
+        QString path = env.value(QStringLiteral("PATH"));
+        for (const QString& d : Yt::extraBinDirs()) path += QString(QDir::listSeparator()) + d;
+        env.insert(QStringLiteral("PATH"), path);
+        m_p.setProcessEnvironment(env);
+        m_p.start(exe, args);
+    }
+
+    void abort()
+    {
+        if (m_done) return;
+        m_aborted = true;
+        if (m_p.state() == QProcess::NotRunning) { m_done = true; deleteLater(); }
+        else m_p.kill();
+    }
+
+signals:
+    void line(const QByteArray& l);
+    void done(bool ok, const QString& error);
+
+private:
+    void drain(bool all)
+    {
+        m_buf += m_p.readAllStandardOutput();
+        int nl;
+        while ((nl = m_buf.indexOf('\n')) >= 0) {
+            const QByteArray l = m_buf.left(nl).trimmed();
+            m_buf.remove(0, nl + 1);
+            if (!l.isEmpty() && !m_aborted) emit line(l);
+        }
+        if (all) {
+            const QByteArray rest = m_buf.trimmed();
+            m_buf.clear();
+            if (!rest.isEmpty() && !m_aborted) emit line(rest);
+        }
+    }
+
+    void finish(bool ok, const QString& err)
+    {
+        if (m_done) return;
+        m_done = true;
+        if (!m_aborted) emit done(ok, err);
+        deleteLater();
+    }
+
+    QString errorText() const
+    {
+        QString lastErr, lastAny;
+        const QList<QByteArray> lines = m_err.split('\n');
+        for (const QByteArray& b : lines) {
+            const QString s = QString::fromUtf8(b).trimmed();
+            if (s.isEmpty()) continue;
+            lastAny = s;
+            if (s.contains(QLatin1String("ERROR"))) lastErr = s;
+        }
+        return lastErr.isEmpty() ? lastAny : lastErr;
+    }
+
+    QProcess   m_p;
+    QByteArray m_buf, m_err;
+    bool       m_done = false;
+    bool       m_aborted = false;
 };
 
 // ============================================================================

@@ -4,61 +4,7 @@
 #include <cmath>
 #include <initializer_list>
 
-// ============================================================================
-//  Theme helpers
-// ============================================================================
-namespace Theme {
-
-inline QColor bg()      { return QColor(0x12, 0x12, 0x12); }
-inline QColor accent()  { return QColor(0x1D, 0xB9, 0x54); }
-inline QColor subtext() { return QColor(0xB3, 0xB3, 0xB3); }
-
-inline QColor mix(const QColor& a, const QColor& b, qreal t)
-{
-    t = qBound<qreal>(0.0, t, 1.0);
-    return QColor::fromRgbF(float(a.redF()   + (b.redF()   - a.redF())   * t),
-                            float(a.greenF() + (b.greenF() - a.greenF()) * t),
-                            float(a.blueF()  + (b.blueF()  - a.blueF())  * t),
-                            float(a.alphaF() + (b.alphaF() - a.alphaF()) * t));
-}
-
-inline QFont font(int px, QFont::Weight w = QFont::Normal)
-{
-    QFont f;
-    f.setFamilies({ "Segoe UI Variable Text", "Segoe UI", "Inter", "SF Pro Text",
-                    "Helvetica Neue", "Ubuntu", "Arial" });
-    f.setPixelSize(px);
-    f.setWeight(w);
-    f.setHintingPreference(QFont::PreferNoHinting);
-    return f;
-}
-
-// Pleasant, dark-ish tint derived from cover art (used for the gradients).
-inline QColor defaultTint() { return QColor(0x1f, 0x4d, 0x35); }
-
-inline QColor tintFrom(const QImage& src)
-{
-    if (src.isNull()) return defaultTint();
-    QImage s = src.scaled(24, 24, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-                   .convertToFormat(QImage::Format_RGB32);
-    qint64 r = 0, g = 0, b = 0;
-    for (int y = 0; y < s.height(); ++y)
-        for (int x = 0; x < s.width(); ++x) {
-            QRgb c = s.pixel(x, y);
-            r += qRed(c); g += qGreen(c); b += qBlue(c);
-        }
-    const int n = s.width() * s.height();
-    QColor c(int(r / n), int(g / n), int(b / n));
-    float h = float(c.hsvHueF());
-    float sat = float(c.hsvSaturationF());
-    float v = float(c.valueF());
-    if (h < 0) h = 0;
-    sat = qMin(1.0f, sat * 1.25f);
-    v = qBound(0.32f, v, 0.62f);
-    return QColor::fromHsvF(h, sat, v);
-}
-
-} // namespace Theme
+#include "theme.h"
 
 inline QString fmtTime(qint64 ms)
 {
@@ -144,10 +90,10 @@ inline void drawCover(QPainter* p, const QRectF& r, const QPixmap& pm, qreal rad
         p->drawPixmap(r, pm, QRectF((w - side) / 2, (h - side) / 2, side, side));
     } else {
         QLinearGradient g(r.topLeft(), r.bottomRight());
-        g.setColorAt(0, QColor(0x3a, 0x3a, 0x3a));
-        g.setColorAt(1, QColor(0x22, 0x22, 0x22));
+        g.setColorAt(0, Theme::greyAt(0.169));
+        g.setColorAt(1, Theme::greyAt(0.084));
         p->fillRect(r, g);
-        p->setPen(QColor(0x8a, 0x8a, 0x8a));
+        p->setPen(Theme::greyAt(0.506));
         p->setFont(Theme::font(qMax(8, int(r.height() * 0.42)), QFont::Bold));
         p->drawText(r, Qt::AlignCenter, QString(QChar(0x266A)));
     }
@@ -160,7 +106,7 @@ inline void drawCover(QPainter* p, const QRectF& r, const QPixmap& pm, qreal rad
 class IconButton : public QAbstractButton
 {
 public:
-    enum Kind { Prev, Next, Shuffle, Repeat, Play, Chevron, Speaker, Home, Plus, More, Info };
+    enum Kind { Prev, Next, Shuffle, Repeat, Play, Chevron, Speaker, Home, Plus, More, Lyrics, Info };
 
     IconButton(Kind kind, int size, QWidget* parent = nullptr)
         : QAbstractButton(parent), m_kind(kind)
@@ -171,8 +117,8 @@ public:
         bindUpdate(this, { &m_hover, &m_press, &m_morph, &m_active });
     }
 
-    void setCircle(const QColor& c, const QColor& glyph = QColor(10, 10, 10))
-    { m_circle = c; m_glyph = glyph; m_hasCircle = true; update(); }
+    void setCircle(const QColor& c, const QColor& glyph = QColor())
+    { m_circle = c; m_glyph = glyph.isValid() ? glyph : Theme::contrast(c); m_hasCircle = true; update(); }
     void setPlaying(bool p)         { m_morph.to(p ? 1.0 : 0.0, 420, QEasingCurve::OutCubic); }
     void setActive(bool a)          { m_active.to(a ? 1.0 : 0.0, 220); }
     void setRepeatOne(bool one)     { m_one = one; update(); }
@@ -203,7 +149,7 @@ protected:
         const qreal s = (1.0 + 0.07 * hv) * m_press.value();
         p.scale(s, s);
 
-        QColor col = Theme::mix(Theme::mix(Theme::subtext(), Qt::white, hv),
+        QColor col = Theme::mix(Theme::mix(Theme::subtext(), Theme::fg(), hv),
                                 Theme::accent(), m_active.value());
         if (m_hasCircle) {
             p.setPen(Qt::NoPen);
@@ -340,23 +286,36 @@ protected:
             break;
         }
 
-        case Info: {
-            p.scale(d, d);
-            p.setPen(QPen(col, 0.05, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            p.setBrush(Qt::NoBrush);
-            p.drawEllipse(QPointF(0, 0), 0.26, 0.26);
-            p.drawLine(QPointF(0, -0.02), QPointF(0, 0.11));
-            p.setPen(Qt::NoPen);
-            p.setBrush(col);
-            p.drawEllipse(QPointF(0, -0.095), 0.03, 0.03);
-            break;
-        }
-
         case More: {
             p.scale(d, d);
             p.setPen(Qt::NoPen);
             p.setBrush(col);
             for (qreal x : { -0.13, 0.0, 0.13 }) p.drawEllipse(QPointF(x, 0), 0.036, 0.036);
+            break;
+        }
+
+        case Lyrics: {            // speech bubble with text lines
+            p.scale(d, d);
+            p.setPen(QPen(col, 0.05, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            QPainterPath b;
+            b.addRoundedRect(QRectF(-0.22, -0.19, 0.44, 0.31), 0.07, 0.07);
+            b.moveTo(-0.10, 0.12); b.lineTo(-0.10, 0.22); b.lineTo(0.02, 0.12);
+            p.drawPath(b);
+            p.drawLine(QPointF(-0.12, -0.08), QPointF(0.12, -0.08));
+            p.drawLine(QPointF(-0.12, 0.01),  QPointF(0.05, 0.01));
+            break;
+        }
+
+        case Info: {              // window with a side panel
+            p.scale(d, d);
+            p.setPen(QPen(col, 0.05, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            p.drawRoundedRect(QRectF(-0.22, -0.17, 0.44, 0.34), 0.06, 0.06);
+            p.drawLine(QPointF(0.06, -0.17), QPointF(0.06, 0.17));
+            p.setPen(Qt::NoPen);
+            p.setBrush(col);
+            p.drawRoundedRect(QRectF(0.10, -0.12, 0.08, 0.24), 0.02, 0.02);
             break;
         }
         }
@@ -459,12 +418,12 @@ protected:
         QRectF track(pad, height() / 2.0 - h / 2.0, width() - 2 * pad, h);
 
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, 60));
+        p.setBrush(Theme::fgA(60));
         p.drawRoundedRect(track, h / 2, h / 2);
 
         const qreal fw = track.width() * m_value;
         if (fw > 0.0) {
-            p.setBrush(Theme::mix(Qt::white, Theme::accent(), hot));
+            p.setBrush(Theme::mix(Theme::fg(), Theme::accent(), hot));
             p.drawRoundedRect(QRectF(track.left(), track.top(), qMax(fw, h), h), h / 2, h / 2);
         }
         const qreal hr = 6.5 * hot;
@@ -472,7 +431,7 @@ protected:
             const QPointF c(track.left() + fw, height() / 2.0);
             p.setBrush(QColor(0, 0, 0, 70));
             p.drawEllipse(c + QPointF(0, 1), hr + 1.5, hr + 1.5);
-            p.setBrush(Qt::white);
+            p.setBrush(Theme::fg());
             p.drawEllipse(c, hr, hr);
         }
     }
@@ -571,7 +530,7 @@ private:
 class ElidedLabel : public QWidget
 {
 public:
-    ElidedLabel(int px, QFont::Weight weight, const QColor& color,
+    ElidedLabel(int px, QFont::Weight weight, const Theme::Color& color,
                 Qt::Alignment align = Qt::AlignLeft, QWidget* parent = nullptr)
         : QWidget(parent), m_font(Theme::font(px, weight)), m_color(color), m_align(align)
     {
@@ -601,7 +560,7 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::TextAntialiasing);
         p.setFont(m_font);
-        p.setPen(m_color);
+        p.setPen(m_color.get());
         const QFontMetrics fm(m_font);
         const qreal f = m_fade.value();
         auto draw = [&](const QString& s, qreal op, qreal dx) {
@@ -616,7 +575,7 @@ protected:
 
 private:
     QFont         m_font;
-    QColor        m_color;
+    Theme::Color  m_color;
     Qt::Alignment m_align;
     QString       m_text, m_old;
     Tween         m_fade{this, 1.0};
@@ -645,6 +604,10 @@ public:
     }
     QColor current() const { return Theme::mix(m_from, m_to, m_t.value()); }
 
+    // Glass panels let the theme's gradient / image show through; the full-screen sheet stays solid.
+    void setSolid(bool solid) { m_solid = solid; update(); }
+    void setAlwaysTint(bool on) { m_alwaysTint = on; update(); }
+
 protected:
     void paintEvent(QPaintEvent*) override
     {
@@ -653,12 +616,19 @@ protected:
         QPainterPath path;
         path.addRoundedRect(QRectF(rect()), m_radius, m_radius);
         p.setClipPath(path);
-        p.fillRect(rect(), Theme::bg());
-        if (m_strength > 0.0) {
+        const qreal pa = m_solid ? 1.0 : Theme::panelAlpha();
+        QColor base = Theme::bg();
+        base.setAlphaF(float(pa));
+        p.fillRect(rect(), base);
+        if (m_strength > 0.0 && (m_alwaysTint || Theme::cur().coverTint)) {
             const int h = m_reach > 0 ? m_reach : height();
+            QColor tint = current();
+            if (Theme::isLight()) tint = Theme::mix(tint, QColor(Qt::white), 0.6);
+            QColor top = Theme::mix(Theme::bg(), tint, m_strength);
+            top.setAlphaF(float(pa));
             QLinearGradient g(0, 0, 0, h);
-            g.setColorAt(0, Theme::mix(Theme::bg(), current(), m_strength));
-            g.setColorAt(1, Theme::bg());
+            g.setColorAt(0, top);
+            g.setColorAt(1, base);
             p.fillRect(QRect(0, 0, width(), h), g);
         }
     }
@@ -668,6 +638,8 @@ private:
     int    m_reach;
     int    m_radius;
     QColor m_from, m_to;
+    bool   m_solid = false;
+    bool   m_alwaysTint = false;
     Tween  m_t{this, 1.0};
 };
 
@@ -716,11 +688,11 @@ protected:
 
         const qreal hv = m_hover.value();
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, int(26 * hv) + (m_selected ? 14 : 0)));
+        p.setBrush(Theme::fgA(int(26 * hv) + (m_selected ? 14 : 0)));
         p.drawRoundedRect(r, 9, 9);
 
-        const QColor col = m_selected ? QColor(Qt::white)
-                                      : Theme::mix(Theme::subtext(), Qt::white, hv);
+        const QColor col = m_selected ? Theme::fg()
+                                      : Theme::mix(Theme::subtext(), Theme::fg(), hv);
         // icon in a 22x22 box
         p.save();
         p.translate(r.left() + 14, r.center().y() - 11);
@@ -775,7 +747,9 @@ private:
 };
 
 // ============================================================================
-//  NowPlayingSheet: full-screen sheet that slides up (and can be dragged down)
+//  NowPlayingSheet: full-screen sheet that slides up (and can be dragged down).
+//  It has two looks that glide into each other: big cover, or cover on the left
+//  with the lyrics on the right.
 // ============================================================================
 class NowPlayingSheet : public TintWidget
 {
@@ -784,15 +758,20 @@ public:
     explicit NowPlayingSheet(QWidget* host)
         : TintWidget(1.0, 0, 12, host), m_host(host)
     {
+        setSolid(true);
+        setAlwaysTint(true);
         hide();
         host->installEventFilter(this);
 
         m_close = new IconButton(IconButton::Chevron, 44, this);
-        auto* hdr = new ElidedLabel(12, QFont::DemiBold, QColor(255, 255, 255, 170), Qt::AlignCenter, this);
+        auto* hdr = new ElidedLabel(12, QFont::DemiBold, Theme::Color::fgAlpha(170), Qt::AlignCenter, this);
         hdr->setText(QStringLiteral("NOW PLAYING"), false);
-        m_cover  = new CoverView(16, 44, this);
-        m_title  = new ElidedLabel(30, QFont::Bold, Qt::white, Qt::AlignCenter, this);
-        m_artist = new ElidedLabel(17, QFont::Medium, QColor(255, 255, 255, 170), Qt::AlignCenter, this);
+
+        m_body = new QWidget(this);
+        m_body->installEventFilter(this);
+        m_cover  = new CoverView(16, 44, m_body);
+        m_title  = new ElidedLabel(30, QFont::Bold, Theme::Color::fgRole(), Qt::AlignCenter, m_body);
+        m_artist = new ElidedLabel(17, QFont::Medium, Theme::Color::fgAlpha(170), Qt::AlignCenter, m_body);
 
         auto* v = new QVBoxLayout(this);
         v->setContentsMargins(24, 18, 24, 28);
@@ -801,31 +780,41 @@ public:
         top->addWidget(hdr, 1);
         top->addSpacing(44);
         v->addLayout(top);
-        v->addStretch(1);
-        v->addWidget(m_cover, 0, Qt::AlignHCenter);
-        v->addSpacing(8);
-        v->addWidget(m_title);
-        v->addSpacing(2);
-        v->addWidget(m_artist);
-        v->addStretch(2);
+        v->addWidget(m_body, 1);
 
         connect(m_close, &QAbstractButton::clicked, this, [this] { closeSheet(); });
         connect(&m_pos, &Tween::changed, this, [this] {
             relayout();
             if (m_pos.value() <= 0.0005 && m_pos.target() == 0.0) hide();
         });
+        connect(&m_lyr, &Tween::changed, this, [this] { layoutBody(); });
     }
 
     bool isOpen() const { return m_pos.target() > 0.5; }
+    bool lyricsMode() const { return m_lyr.target() > 0.5; }
 
-    void openSheet()
+    // Slides the sheet up. `lyrics` picks the look it opens in.
+    void openSheet(bool lyrics = false)
     {
+        if (!isOpen()) m_lyr.set(lyrics ? 1.0 : 0.0);
+        else           m_lyr.to(lyrics ? 1.0 : 0.0, 520, QEasingCurve::OutCubic);
+        layoutBody();
         relayout();
         show();
         raise();
         m_pos.to(1.0, 540, QEasingCurve::OutCubic);
+        emit stateChanged();
     }
-    void closeSheet() { m_pos.to(0.0, 380, QEasingCurve::InOutCubic); }
+    void closeSheet()
+    {
+        m_pos.to(0.0, 380, QEasingCurve::InOutCubic);
+        emit stateChanged();
+    }
+    void setLyricsMode(bool on)
+    {
+        m_lyr.to(on ? 1.0 : 0.0, 520, QEasingCurve::OutCubic);
+        emit stateChanged();
+    }
 
     void setTrack(const QString& title, const QString& artist, const QPixmap& cover, const QColor& tint)
     {
@@ -836,18 +825,31 @@ public:
     }
     void setPlaying(bool p) { m_cover->setScale(p ? 1.0 : 0.84); }
 
+    // The lyrics widget lives on the right of the sheet while in lyrics mode.
+    void addLyricsView(QWidget* lv)
+    {
+        if (!lv) return;
+        m_lyrics = lv;
+        lv->setParent(m_body);
+        lv->hide();
+        layoutBody();
+    }
+
+signals:
+    void stateChanged();
+
 protected:
     bool eventFilter(QObject* o, QEvent* e) override
     {
         if (o == m_host && e->type() == QEvent::Resize) relayout();
+        else if (o == m_body && e->type() == QEvent::Resize) layoutBody();
         return QWidget::eventFilter(o, e);
     }
 
     void resizeEvent(QResizeEvent* e) override
     {
         TintWidget::resizeEvent(e);
-        const int side = qBound(180, int(qMin(width() * 0.55, height() * 0.46)), 560);
-        m_cover->setFixedSize(side + 88, side + 88);
+        layoutBody();
     }
 
     // Drag down to dismiss, like an iOS sheet.
@@ -879,12 +881,50 @@ private:
         setGeometry(area.translated(0, off));
     }
 
+    // Positions cover, title, artist and lyrics for the current blend (m_lyr: 0 = cover only, 1 = with lyrics).
+    void layoutBody()
+    {
+        if (!m_body) return;
+        const int W = m_body->width(), H = m_body->height();
+        if (W < 10 || H < 10) return;
+        const qreal t = qBound(0.0, m_lyr.value(), 1.0);
+        const int th = m_title->height(), ah = m_artist->height();
+        auto lerp = [t](qreal a, qreal b) { return a + (b - a) * t; };
+
+        // look 0: big centred cover
+        const qreal a0 = qBound(180.0, qMin(W * 0.55, H * 0.46), 560.0);
+        const qreal tw0 = qMin(W - 48, 900);
+        const qreal stack0 = (a0 + 88) + 8 + th + 2 + ah;
+        // look 1: cover column on the left, lyrics on the right
+        const qreal lw = qBound<qreal>(240.0, W * 0.38, 460.0);
+        const qreal a1 = qBound<qreal>(110.0, qMin(lw - 88, H * 0.5), 560.0);
+        const qreal tw1 = lw - 16;
+        const qreal stack1 = (a1 + 88) + 8 + th + 2 + ah;
+
+        const qreal a = lerp(a0, a1), cx = lerp(W / 2.0, lw / 2.0), tw = lerp(tw0, tw1);
+        const qreal y = lerp((H - stack0) / 2.0, (H - stack1) / 2.0);
+        const int cs = int(a + 88);
+        m_cover->setGeometry(int(cx - cs / 2.0), int(y), cs, cs);
+        m_title->setGeometry(int(cx - tw / 2.0), int(y) + cs + 8, int(tw), th);
+        m_artist->setGeometry(int(cx - tw / 2.0), int(y) + cs + 8 + th + 2, int(tw), ah);
+
+        if (m_lyrics) {
+            const int lx = int(lw) + 16;
+            const int fx = int(lerp(W, lx));
+            m_lyrics->setGeometry(fx, 0, qMax(100, W - lx - 8), H);
+            m_lyrics->setVisible(t > 0.001);
+        }
+    }
+
     QWidget*     m_host;
+    QWidget*     m_body = nullptr;
+    QWidget*     m_lyrics = nullptr;
     IconButton*  m_close;
     CoverView*   m_cover;
     ElidedLabel* m_title;
     ElidedLabel* m_artist;
     Tween        m_pos{this, 0.0};
+    Tween        m_lyr{this, 0.0};
     bool         m_dragging = false;
     qreal        m_dragY = 0;
 };
