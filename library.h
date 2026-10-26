@@ -19,7 +19,8 @@ enum TrackRole {
     AlbumRole,
     DurationRole,
     CoverRole,
-    SearchRole
+    SearchRole,
+    PendingRole     // true if track is a pending match (query but no videoId yet)
 };
 
 struct MetaResult {
@@ -37,6 +38,13 @@ struct Track {
     QColor  tint;               // invalid until cover art is known
     bool    online = false;     // true = YouTube stream (no local file)
     QString videoId, thumbUrl;
+    // Dir2 additions
+    QString webUrl;             // for non-YouTube online sources
+    QString query;              // "Artist Title" search query for unmatched imports
+    bool    locked = false;     // metadata is authoritative (CSV/Deezer imports)
+
+    bool pending() const { return online && videoId.isEmpty() && !query.isEmpty(); }
+    QString key()  const { return online ? (QStringLiteral("yt:") + videoId) : path; }
 };
 
 // ============================================================================
@@ -141,6 +149,7 @@ public:
         case DurationRole:    return t.durationMs;
         case CoverRole:       return t.thumb;
         case SearchRole:      return t.title + QLatin1Char(' ') + t.artist + QLatin1Char(' ') + t.album;
+        case PendingRole:     return t.pending();
         }
         return {};
     }
@@ -418,7 +427,7 @@ public:
 
         if (hov > 0.002) {
             p->setPen(Qt::NoPen);
-            p->setBrush(QColor(255, 255, 255, int(28 * hov)));
+            p->setBrush(Theme::fgA(int(28 * hov)));
             p->drawRoundedRect(r, 8, 8);
         }
 
@@ -435,7 +444,7 @@ public:
                         QString::number(ix.row() + 1));
             if (hov > 0.02) {
                 p->setPen(Qt::NoPen);
-                p->setBrush(QColor(255, 255, 255, int(255 * hov)));
+                p->setBrush(Theme::fgA(int(255 * hov)));
                 QPolygonF t;
                 t << QPointF(c.x() - 5.5, c.y() - 7) << QPointF(c.x() + 7, c.y()) << QPointF(c.x() - 5.5, c.y() + 7);
                 p->drawPolygon(t);
@@ -461,18 +470,18 @@ public:
         const int tw = int(qMax<qreal>(10, titleRight - textX));
 
         p->setFont(tf);
-        p->setPen(current ? Theme::accent() : QColor(Qt::white));
+        p->setPen(current ? Theme::accent() : Theme::fg());
         p->drawText(QRectF(textX, r.top() + 6, tw, 22), int(Qt::AlignLeft | Qt::AlignVCenter),
                     tfm.elidedText(ix.data().toString(), Qt::ElideRight, tw));
 
         p->setFont(af);
-        p->setPen(Theme::mix(Theme::subtext(), Qt::white, hov * 0.6));
+        p->setPen(Theme::mix(Theme::subtext(), Theme::fg(), hov * 0.6));
         p->drawText(QRectF(textX, r.top() + 28, tw, 20), int(Qt::AlignLeft | Qt::AlignVCenter),
                     afm.elidedText(ix.data(ArtistRole).toString(), Qt::ElideRight, tw));
 
         if (showAlbum) {
             const int aw = int(durR.left() - 16 - albumX);
-            p->setPen(Theme::mix(Theme::subtext(), Qt::white, hov * 0.6));
+            p->setPen(Theme::mix(Theme::subtext(), Theme::fg(), hov * 0.6));
             p->drawText(QRectF(albumX, r.top(), aw, r.height()), int(Qt::AlignLeft | Qt::AlignVCenter),
                         afm.elidedText(ix.data(AlbumRole).toString(), Qt::ElideRight, aw));
         }
@@ -512,7 +521,7 @@ public:
     explicit TrackView(QWidget* parent = nullptr) : QListView(parent)
     {
         setFrameShape(QFrame::NoFrame);
-        setStyleSheet(QStringLiteral("QListView { background: transparent; border: none; outline: none; }"));
+        sty(this, QStringLiteral("QListView { background: transparent; border: none; outline: none; }"));
         viewport()->setAutoFillBackground(false);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -532,6 +541,8 @@ public:
     }
 
     void setEmptyText(const QString& t) { m_empty = t; viewport()->update(); }
+
+    void resetRowState() { m_hover.clear(); m_appear.clear(); viewport()->update(); }
 
     // false = the list never scrolls by itself (it sits inside a page that scrolls instead)
     void setScrollable(bool s)
@@ -628,7 +639,7 @@ protected:
         if (model() && model()->rowCount() == 0 && !m_empty.isEmpty()) {
             QPainter p(viewport());
             p.setRenderHint(QPainter::TextAntialiasing);
-            p.setPen(QColor(255, 255, 255, 120));
+            p.setPen(Theme::fgA(120));
             p.setFont(Theme::font(15, QFont::Medium));
             p.drawText(viewport()->rect().adjusted(30, 0, -30, 80),
                        int(Qt::AlignCenter | Qt::TextWordWrap), m_empty);
@@ -658,7 +669,7 @@ private:
             p.setPen(Qt::NoPen);
             p.setBrush(Theme::accent());
             p.drawRoundedRect(QRectF(pm.rect()), 17, 17);
-            p.setPen(QColor(10, 10, 10));
+            p.setPen(Theme::onAccent());
             p.setFont(f);
             p.drawText(pm.rect(), Qt::AlignCenter, txt);
         }

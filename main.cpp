@@ -1,8 +1,8 @@
 #include <QtWidgets>
 #include <QAudioOutput>
 #include <QMediaPlayer>
-#include <QMediaFormat>
 #include <QMediaMetaData>
+#include <QMediaFormat>
 #include <unordered_map>
 #include <algorithm>
 
@@ -12,9 +12,14 @@
 #include "playlists.h"
 #include "google.h"
 #include "importdialog.h"
+#include "dialogs.h"
 #include "ui.h"
+#include "themedialog.h"
+#include "home.h"
+#include "lyrics.h"
 #include "relay.h"
 #include "infopanel.h"
+#include "discord.h"
 
 static const QSet<QString>& audioExts()
 {
@@ -62,7 +67,7 @@ static QIcon searchIcon()
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setPen(QPen(QColor(0xb3, 0xb3, 0xb3), 1.9, Qt::SolidLine, Qt::RoundCap));
+    p.setPen(QPen(Theme::subtext(), 1.9, Qt::SolidLine, Qt::RoundCap));
     p.setBrush(Qt::NoBrush);
     p.drawEllipse(QRectF(3, 3, 11.5, 11.5));
     p.drawLine(QPointF(12.3, 12.3), QPointF(18, 18));
@@ -106,17 +111,12 @@ protected:
             if (u.isLocalFile()) in << u.toLocalFile();
         openPaths(in);
     }
-    void resizeEvent(QResizeEvent* e) override
-    {
-        QMainWindow::resizeEvent(e);
-        updateInfoVisibility();
-    }
     void closeEvent(QCloseEvent* e) override
     {
         QSettings s;
         s.setValue("geometry", saveGeometry());
         s.setValue("volume", m_volume->value() > 0.001 ? m_volume->value() : m_preMute);
-        s.setValue("infoPanel", m_infoWanted);
+        if (m_rpc) m_rpc->shutdown();           // removes the "Listening to" status from Discord
         QMainWindow::closeEvent(e);
     }
 
@@ -136,11 +136,7 @@ private:
     // =====================================================================
     void buildUi()
     {
-        auto* central = new QWidget(this);
-        central->setAutoFillBackground(true);
-        QPalette pal;
-        pal.setColor(QPalette::Window, Qt::black);
-        central->setPalette(pal);
+        auto* central = new ThemedCentral(this);      // flat canvas, gradient or custom image behind the panels
         setCentralWidget(central);
 
         auto* root = new QVBoxLayout(central);
@@ -167,10 +163,6 @@ private:
         m_stack->addWidget(m_page);           // 1 = offline library
         m_stack->addWidget(m_plPage);         // 2 = open playlist
         upper->addWidget(m_stack, 1);
-        m_info = new InfoPanel;                 // song info sidebar (right)
-        upper->addWidget(m_info);
-        m_info->hide();
-        connect(m_info, &InfoPanel::closeRequested, this, [this] { setInfoWanted(false); });
 
         root->addWidget(m_upper, 1);
         root->addWidget(buildPlayerBar());
@@ -178,6 +170,48 @@ private:
         // sheet + toast are created last so they sit on top
         m_sheet = new NowPlayingSheet(m_upper);
         m_toast = new Toast(central);
+
+        // Info panel (right sidebar): slides in from the right; toggled by the player-bar icon or Ctrl+Shift+I
+        m_infoPanel = new InfoPanel;
+        m_infoHost = new SlideHost(m_infoPanel, InfoPanel::kWidth, m_upper);
+        m_upper->layout()->addWidget(m_infoHost);    // far right, next to the pages
+        connect(m_infoPanel, &InfoPanel::closeRequested, this, [this] { m_infoHost->setOpen(false); });
+        connect(m_infoHost, &SlideHost::openChanged, this, [this](bool on) { if (m_infoBtn) m_infoBtn->setActive(on); });
+        m_sheet->raise();                            // the full-screen sheet always stays on top
+        m_toast->raise();
+
+        // Lyrics service + view
+        m_lyricsService = new LyricsService(this);
+        m_lyricsView = new LyricsView;
+        // The lyrics view is shown inside the NowPlayingSheet via its layout
+        m_sheet->addLyricsView(m_lyricsView);
+        connect(m_lyricsService, &LyricsService::ready, this, [this](const QString& key, const LyricsDoc& doc) {
+            if (!m_lyricsView || key != m_lyricsKey) return;            // a song that is no longer the current one
+            if (doc.instrumental) { m_lyricsView->setMessage(QStringLiteral("This track is instrumental.")); return; }
+            m_lyricsView->setDoc(doc, 0);
+            m_lyricsView->setPosition(m_player ? m_player->position() : 0);
+        });
+        connect(m_lyricsService, &LyricsService::failed, this, [this](const QString& key, const QString& msg) {
+            if (m_lyricsView && key == m_lyricsKey) m_lyricsView->setMessage(msg);
+        });
+        connect(m_sheet, &NowPlayingSheet::stateChanged, this, [this] {
+            if (m_lyricsBtn) m_lyricsBtn->setActive(m_sheet->isOpen() && m_sheet->lyricsMode());
+        });
+        connect(m_lyricsView, &LyricsView::seekRequested, this, [this](qint64 ms) { seekTo(ms); });
+
+        // Deezer chart service (Home page trending content)
+        m_imgCache = new ImageCache(this);
+        m_charts = new ChartService(this);
+        connect(m_charts, &ChartService::tracksReady, this, [this](const QVector<Track>& tracks) {
+            m_chartSongs = tracks;
+            populateChartShelf();
+        });
+        connect(m_charts, &ChartService::artistsReady, this, [this](const QVector<ChartItem>& items) {
+            m_chartArtists = items;
+        });
+        connect(m_charts, &ChartService::albumsReady, this, [this](const QVector<ChartItem>& items) {
+            m_chartAlbums = items;
+        });
 
         wireUi();
     }
@@ -198,7 +232,7 @@ private:
 
         auto* logo = new QLabel(QStringLiteral("<span style='color:#1DB954'>&#9679;</span>&nbsp;Pulsify"));
         logo->setTextFormat(Qt::RichText);
-        logo->setStyleSheet("font-size:26px;font-weight:800;color:white;padding:2px 14px 14px 14px;background:transparent;");
+        sty(logo, "font-size:26px;font-weight:800;color:white;padding:2px 14px 14px 14px;background:transparent;");
         nl->addWidget(logo);
 
         m_navHome = new NavButton(NavButton::Home, QStringLiteral("Home"));
@@ -225,12 +259,12 @@ private:
         auto* hdr = new QHBoxLayout;
         hdr->setContentsMargins(10, 0, 4, 4);
         auto* hl = new QLabel(QStringLiteral("Playlists"));
-        hl->setStyleSheet("font-size:15px;font-weight:700;color:#b3b3b3;background:transparent;");
+        sty(hl, "font-size:15px;font-weight:700;color:#b3b3b3;background:transparent;");
         auto* create = new QPushButton(QStringLiteral("+  Create"));
         create->setCursor(Qt::PointingHandCursor);
         create->setFocusPolicy(Qt::NoFocus);
         create->setFixedHeight(32);
-        create->setStyleSheet(
+        sty(create, 
             "QPushButton{background:rgba(255,255,255,0.09);color:white;border:none;border-radius:16px;"
             "padding:0 14px;font-size:13px;font-weight:700;}"
             "QPushButton:hover{background:rgba(255,255,255,0.18);}");
@@ -239,7 +273,7 @@ private:
         importBtn->setFocusPolicy(Qt::NoFocus);
         importBtn->setFixedHeight(32);
         importBtn->setToolTip(QStringLiteral("Import playlists from YouTube / YouTube Music (Ctrl+I)"));
-        importBtn->setStyleSheet(create->styleSheet());
+        sty(importBtn, Theme::origSheet(create));
         hdr->addWidget(hl);
         hdr->addStretch(1);
         hdr->addWidget(importBtn);
@@ -251,20 +285,20 @@ private:
 
         m_plEmpty = new QFrame;
         m_plEmpty->setObjectName(QStringLiteral("plEmpty"));
-        m_plEmpty->setStyleSheet("QFrame#plEmpty{background:rgba(255,255,255,0.07);border-radius:10px;}");
+        sty(m_plEmpty, "QFrame#plEmpty{background:rgba(255,255,255,0.07);border-radius:10px;}");
         auto* el = new QVBoxLayout(m_plEmpty);
         el->setContentsMargins(18, 18, 18, 18);
         el->setSpacing(6);
         auto* t1 = new QLabel(QStringLiteral("Create your first playlist"));
-        t1->setStyleSheet("font-size:15px;font-weight:700;color:white;background:transparent;");
+        sty(t1, "font-size:15px;font-weight:700;color:white;background:transparent;");
         auto* t2 = new QLabel(QStringLiteral("Add songs from your library or YouTube. Drag them in, or right-click a song."));
         t2->setWordWrap(true);
-        t2->setStyleSheet("font-size:13px;color:#b3b3b3;background:transparent;");
+        sty(t2, "font-size:13px;color:#b3b3b3;background:transparent;");
         auto* eb = new QPushButton(QStringLiteral("Create playlist"));
         eb->setCursor(Qt::PointingHandCursor);
         eb->setFocusPolicy(Qt::NoFocus);
         eb->setFixedHeight(34);
-        eb->setStyleSheet(
+        sty(eb, 
             "QPushButton{background:white;color:black;border:none;border-radius:17px;padding:0 18px;font-size:13px;font-weight:700;}"
             "QPushButton:hover{background:#f0f0f0;}QPushButton:pressed{background:#d8d8d8;}");
         el->addWidget(t1);
@@ -276,7 +310,7 @@ private:
         ib->setCursor(Qt::PointingHandCursor);
         ib->setFocusPolicy(Qt::NoFocus);
         ib->setFixedHeight(34);
-        ib->setStyleSheet(
+        sty(ib, 
             "QPushButton{background:rgba(255,255,255,0.12);color:white;border:none;border-radius:17px;padding:0 16px;font-size:13px;font-weight:700;}"
             "QPushButton:hover{background:rgba(255,255,255,0.22);}");
         ebRow->addWidget(eb);
@@ -298,7 +332,7 @@ private:
 
         auto* tip = new QLabel(QStringLiteral("Tip: drop audio files anywhere in the window."));
         tip->setWordWrap(true);
-        tip->setStyleSheet("color:#7a7a7a;font-size:12px;padding:4px 10px 2px 10px;background:transparent;");
+        sty(tip, "color:#7a7a7a;font-size:12px;padding:4px 10px 2px 10px;background:transparent;");
         ll->addWidget(tip);
 
         sv->addWidget(lib, 1);
@@ -318,16 +352,16 @@ private:
         auto* titleCol = new QVBoxLayout;
         titleCol->setSpacing(2);
         auto* title = new QLabel(QStringLiteral("Your Library"));
-        title->setStyleSheet("font-size:40px;font-weight:800;color:white;background:transparent;");
+        sty(title, "font-size:40px;font-weight:800;color:white;background:transparent;");
         m_count = new QLabel;
-        m_count->setStyleSheet("font-size:13px;color:#c8c8c8;background:transparent;");
+        sty(m_count, "font-size:13px;color:#c8c8c8;background:transparent;");
         titleCol->addWidget(title);
         titleCol->addWidget(m_count);
         m_search = new QLineEdit;
         m_search->setPlaceholderText(QStringLiteral("Search songs"));
         m_search->setClearButtonEnabled(true);
         m_search->setFixedSize(280, 40);
-        m_search->setStyleSheet(
+        sty(m_search, 
             "QLineEdit{background:rgba(255,255,255,0.10);border:1px solid transparent;border-radius:20px;"
             "padding:0 16px;color:white;font-size:14px;selection-background-color:#1DB954;}"
             "QLineEdit:hover{background:rgba(255,255,255,0.14);}"
@@ -375,15 +409,15 @@ private:
         top->setContentsMargins(24, 16, 24, 10);
         top->setSpacing(10);
         m_homeBtn = new IconButton(IconButton::Home, 48);
-        m_homeBtn->setCircle(QColor(0x1f, 0x1f, 0x1f), Qt::white);
+        m_homeBtn->setCircle(Theme::greyAt(0.055), Theme::fg());
         m_osearch = new QLineEdit;
         m_osearch->setPlaceholderText(QStringLiteral("What do you want to play?"));
         m_osearch->setClearButtonEnabled(true);
         m_osearch->setFixedHeight(48);
         m_osearch->setMinimumWidth(240);
         m_osearch->setMaximumWidth(560);
-        m_osearch->addAction(searchIcon(), QLineEdit::LeadingPosition);
-        m_osearch->setStyleSheet(
+        m_searchAct = m_osearch->addAction(searchIcon(), QLineEdit::LeadingPosition);
+        sty(m_osearch, 
             "QLineEdit{background:#1f1f1f;border:1px solid transparent;border-radius:24px;"
             "padding:0 16px 0 6px;color:white;font-size:15px;selection-background-color:#1DB954;}"
             "QLineEdit:hover{background:#2a2a2a;}"
@@ -393,7 +427,7 @@ private:
         m_refreshBtn->setFocusPolicy(Qt::NoFocus);
         m_refreshBtn->setFixedHeight(36);
         m_refreshBtn->setToolTip(QStringLiteral("Reload the recommendations"));
-        m_refreshBtn->setStyleSheet(
+        sty(m_refreshBtn, 
             "QPushButton{background:rgba(255,255,255,0.10);color:white;border:none;border-radius:18px;"
             "padding:0 18px;font-size:13px;font-weight:700;}"
             "QPushButton:hover{background:rgba(255,255,255,0.18);}"
@@ -404,6 +438,22 @@ private:
         rl->setSpacing(12);
         rl->addStretch(1);
         rl->addWidget(m_refreshBtn);
+        m_themeBtn = new QPushButton(QStringLiteral("Themes"));
+        m_themeBtn->setCursor(Qt::PointingHandCursor);
+        m_themeBtn->setFocusPolicy(Qt::NoFocus);
+        m_themeBtn->setFixedHeight(36);
+        m_themeBtn->setToolTip(QStringLiteral("Themes, gradients and custom backgrounds (Ctrl+T)"));
+        sty(m_themeBtn, Theme::origSheet(m_refreshBtn));
+        rl->addWidget(m_themeBtn);
+        // Settings button (yt-dlp, JS runtime, cookies, lyrics, Google account)
+        auto* settingsBtn = new QPushButton(QStringLiteral("Settings"));
+        settingsBtn->setCursor(Qt::PointingHandCursor);
+        settingsBtn->setFocusPolicy(Qt::NoFocus);
+        settingsBtn->setFixedHeight(36);
+        settingsBtn->setToolTip(QStringLiteral("Settings (yt-dlp, lyrics, Google account)"));
+        sty(settingsBtn, Theme::origSheet(m_refreshBtn));
+        rl->addWidget(settingsBtn);
+        connect(settingsBtn, &QPushButton::clicked, this, [this] { openSettingsDialog(); });
         m_avatar = new AvatarButton(44);
         rl->addWidget(m_avatar);
         top->addStretch(1);
@@ -419,7 +469,7 @@ private:
         // ---- banner: install / update yt-dlp
         m_banner = new QFrame;
         m_banner->setObjectName(QStringLiteral("banner"));
-        m_banner->setStyleSheet(
+        sty(m_banner, 
             "QFrame#banner{background:rgba(255,255,255,0.09);border-radius:10px;margin:0px 34px 10px 34px;}"
             "QLabel{background:transparent;color:#ececec;font-size:13px;}"
             "QPushButton{background:rgba(255,255,255,0.16);color:white;border:none;border-radius:15px;"
@@ -442,7 +492,7 @@ private:
 
         m_oStatus = new QLabel;
         m_oStatus->setContentsMargins(34, 0, 34, 6);
-        m_oStatus->setStyleSheet("font-size:13px;color:#c8c8c8;background:transparent;");
+        sty(m_oStatus, "font-size:13px;color:#c8c8c8;background:transparent;");
         m_oStatus->hide();
         pl->addWidget(m_oStatus);
 
@@ -476,7 +526,7 @@ private:
             b->setCursor(Qt::PointingHandCursor);
             b->setFocusPolicy(Qt::NoFocus);
             b->setFixedHeight(32);
-            b->setStyleSheet(
+            sty(b, 
                 "QPushButton{background:rgba(255,255,255,0.10);color:white;border:none;border-radius:16px;"
                 "padding:0 16px;font-size:14px;font-weight:600;}"
                 "QPushButton:hover{background:rgba(255,255,255,0.18);}"
@@ -513,7 +563,7 @@ private:
         m_homeEmpty->setWordWrap(true);
         m_homeEmpty->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
         m_homeEmpty->setContentsMargins(40, 60, 40, 0);
-        m_homeEmpty->setStyleSheet("font-size:15px;color:#b3b3b3;background:transparent;");
+        sty(m_homeEmpty, "font-size:15px;color:#b3b3b3;background:transparent;");
         v->addWidget(m_homeEmpty);
         v->addStretch(1);
 
@@ -541,7 +591,7 @@ private:
         auto* left = new QVBoxLayout;
         left->setSpacing(10);
         auto* lt = new QLabel(QStringLiteral("Top result"));
-        lt->setStyleSheet(h2);
+        sty(lt, h2);
         m_topCard = new MediaCard(MediaCard::Hero, MediaCard::TrackCard);
         left->addWidget(lt);
         left->addWidget(m_topCard);
@@ -550,7 +600,7 @@ private:
         auto* rightCol = new QVBoxLayout;
         rightCol->setSpacing(10);
         auto* rt = new QLabel(QStringLiteral("Songs"));
-        rt->setStyleSheet(h2);
+        sty(rt, h2);
         m_sproxy = new HeadProxy(this);
         m_sproxy->setSourceModel(m_smodel);
         m_slist = new TrackView;
@@ -594,10 +644,10 @@ private:
         auto* col = new QVBoxLayout;
         col->setSpacing(4);
         auto* kicker = new QLabel(QStringLiteral("PLAYLIST"));
-        kicker->setStyleSheet("font-size:12px;font-weight:700;color:rgba(255,255,255,0.8);background:transparent;");
-        m_plName = new ElidedLabel(54, QFont::Bold, Qt::white);
+        sty(kicker, "font-size:12px;font-weight:700;color:rgba(255,255,255,0.8);background:transparent;");
+        m_plName = new ElidedLabel(54, QFont::Bold, Theme::Color::fgRole());
         m_plMeta = new QLabel;
-        m_plMeta->setStyleSheet("font-size:13px;color:#c8c8c8;background:transparent;");
+        sty(m_plMeta, "font-size:13px;color:#c8c8c8;background:transparent;");
         col->addStretch(1);
         col->addWidget(kicker);
         col->addWidget(m_plName);
@@ -629,7 +679,7 @@ private:
 
     QWidget* buildPlayerBar()
     {
-        auto* bar = new QWidget;
+        auto* bar = new PlayerBarBg;
         bar->setFixedHeight(94);
         auto* bl = new QHBoxLayout(bar);
         bl->setContentsMargins(18, 8, 18, 10);
@@ -646,8 +696,8 @@ private:
         m_barCover->setClickable(true);
         auto* tv = new QVBoxLayout;
         tv->setSpacing(0);
-        m_barTitle  = new ElidedLabel(14, QFont::Medium, Qt::white);
-        m_barArtist = new ElidedLabel(12, QFont::Normal, Theme::subtext());
+        m_barTitle  = new ElidedLabel(14, QFont::Medium, Theme::Color::fgRole());
+        m_barArtist = new ElidedLabel(12, QFont::Normal, Theme::Color::subRole());
         tv->addStretch(1);
         tv->addWidget(m_barTitle);
         tv->addWidget(m_barArtist);
@@ -669,7 +719,7 @@ private:
         m_shuffleBtn = new IconButton(IconButton::Shuffle, 34);
         m_prevBtn    = new IconButton(IconButton::Prev, 38);
         m_playBtn    = new IconButton(IconButton::Play, 44);
-        m_playBtn->setCircle(Qt::white);
+        m_playBtn->setCircle(Theme::fg());
         m_nextBtn    = new IconButton(IconButton::Next, 38);
         m_repeatBtn  = new IconButton(IconButton::Repeat, 34);
         ctrl->addStretch(1);
@@ -687,11 +737,11 @@ private:
         m_timeL = new QLabel(QStringLiteral("0:00"));
         m_timeL->setFixedWidth(46);
         m_timeL->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_timeL->setStyleSheet(timeStyle);
+        sty(m_timeL, timeStyle);
         m_timeR = new QLabel(QStringLiteral("0:00"));
         m_timeR->setFixedWidth(46);
         m_timeR->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        m_timeR->setStyleSheet(timeStyle);
+        sty(m_timeR, timeStyle);
         m_seek = new SmoothSlider;
         seekRow->addWidget(m_timeL);
         seekRow->addWidget(m_seek, 1);
@@ -703,19 +753,22 @@ private:
         auto* rl = new QHBoxLayout(right);
         rl->setContentsMargins(0, 0, 0, 0);
         rl->setSpacing(4);
+        m_lyricsBtn = new IconButton(IconButton::Lyrics, 36);
+        m_lyricsBtn->setToolTip(QStringLiteral("Lyrics (Ctrl+L)"));
+        m_infoBtn = new IconButton(IconButton::Info, 36);
+        m_infoBtn->setToolTip(QStringLiteral("Now playing info (Ctrl+Shift+I)"));
         m_volBtn = new IconButton(IconButton::Speaker, 36);
         m_volume = new SmoothSlider;
         m_volume->setFixedWidth(120);
-        m_infoBtn = new IconButton(IconButton::Info, 34);
-        m_infoBtn->setToolTip(QStringLiteral("Song info (Ctrl+Shift+I)"));
         rl->addStretch(1);
+        rl->addWidget(m_lyricsBtn);
         rl->addWidget(m_infoBtn);
         rl->addSpacing(6);
         rl->addWidget(m_volBtn);
         rl->addWidget(m_volume);
 
         left->setMinimumWidth(220);
-        right->setMinimumWidth(220);
+        right->setMinimumWidth(310);
         bl->addWidget(left, 1);
         bl->addWidget(center, 4);           // no alignment flag: the column (and the seek bar) fills its slot
         bl->addWidget(right, 1);
@@ -787,10 +840,11 @@ private:
         connect(m_homeBtn, &QAbstractButton::clicked, this, [this] { showHome(); });
         connect(m_refreshBtn, &QPushButton::clicked, this, [this] { fetchHome(); });
         connect(m_avatar, &QAbstractButton::clicked, this, [this] { showAccountMenu(); });
+        connect(m_themeBtn, &QPushButton::clicked, this, [this] { openThemeDialog(); });
+        connect(&themeBus(), &ThemeBus::changed, this, [this] { applyThemeColors(); });
         connect(m_google, &GoogleAccount::stateChanged, this, [this] { updateAvatar(); });
         connect(m_google, &GoogleAccount::avatarChanged, this, [this] { updateAvatar(); });
-        updateAvatar();
-        connect(&m_searchDebounce, &QTimer::timeout, this, [this] { runSearch(); });
+        updateAvatar();        connect(&m_searchDebounce, &QTimer::timeout, this, [this] { runSearch(); });
         connect(&m_coverTimer, &QTimer::timeout, this, &MainWindow::refreshPlaylistVisuals);
         connect(m_osearch, &QLineEdit::returnPressed, this, [this] { runSearch(); });
         connect(m_osearch, &QLineEdit::textChanged, this, [this](const QString& t) {
@@ -827,7 +881,7 @@ private:
                 setOnlineStatus(QString());
                 if (m_yt->available()) {
                     const Track* t = trackById(m_currentId);
-                    if (t && t->online && m_player->playbackState() != QMediaPlayer::PlayingState) { m_recoverTries = 0; resolveCurrent(); }
+                    if (t && t->online && m_player->playbackState() != QMediaPlayer::PlayingState) { m_retried = false; resolveCurrent(); }
                     fetchHome();
                     if (!m_osearch->text().trimmed().isEmpty() && m_smodel->rowCount() == 0) runSearch();
                 }
@@ -859,8 +913,10 @@ private:
         connect(m_barCover, &CoverView::clicked, this, [this] {
             if (m_currentId < 0) return;
             if (m_sheet->isOpen()) m_sheet->closeSheet();
-            else m_sheet->openSheet();
+            else m_sheet->openSheet(false);
         });
+        connect(m_lyricsBtn, &QAbstractButton::clicked, this, [this] { toggleLyrics(); });
+        connect(m_infoBtn, &QAbstractButton::clicked, this, [this] { m_infoHost->toggle(); });
         connect(m_addBtn, &QAbstractButton::clicked, this, [this] {
             if (m_currentId < 0) return;
             QMenu menu(this);
@@ -956,15 +1012,6 @@ private:
                                                         const OnlineItem& meta, const QString& err) {
             const Track* t = trackById(m_currentId);
             if (!t || !t->online || t->videoId != videoId || videoId != m_resolveVideo) return;   // stale
-            if (m_relayRefresh) {                       // only renewing the URL of a stream that is already playing
-                m_relayRefresh = false;
-                if (err.isEmpty() && !url.isEmpty() && m_relaySess && m_relay->current() == m_relaySess) {
-                    m_directUrl = url;
-                    if (meta.stream.known()) m_stream = meta.stream;
-                    m_relay->refreshUpstream(m_relaySess, url, meta.stream.headers);
-                }
-                return;                                 // on failure the relay times out and the player recovers
-            }
             m_resolving = false;
             if (!err.isEmpty() || url.isEmpty()) {
                 m_barArtist->setText(QStringLiteral("Couldn't load: ") + err);
@@ -996,52 +1043,51 @@ private:
 
     void buildPlayer()
     {
+        // Stream relay must exist before the player so we can feed it relay URLs.
+        m_relay = new StreamRelay(new QNetworkAccessManager(this), this);
+        connect(m_relay, &StreamRelay::ready, this, [this](quint64 id, const QUrl& local) {
+            if (id != m_relaySession) return;
+            m_player->setSource(local);
+            m_player->play();
+            refreshNowPlaying();
+        });
+        connect(m_relay, &StreamRelay::failed, this, [this](quint64 id, const QString& why) {
+            if (id != m_relaySession) return;
+            const Track* t = trackById(m_currentId);
+            if (t && t->online && !m_retried) { m_retried = true; resolveCurrent(); return; }
+            m_barArtist->setText(QStringLiteral("Stream error: ") + why);
+        });
+        connect(m_relay, &StreamRelay::upstreamRejected, this, [this](quint64 id) {
+            if (id != m_relaySession) return;
+            const Track* t = trackById(m_currentId);
+            if (t && t->online && !m_retried) { m_retried = true; resolveCurrent(); }
+        });
+
         m_player = new QMediaPlayer(this);
         m_audio = new QAudioOutput(this);
         m_player->setAudioOutput(m_audio);
+
+        // Discord Rich Presence. It re-syncs on every player event; the timer also corrects any drift
+        // (for example when a stream stalls and buffers) and clears the status if nothing plays for a while.
+        m_rpc = new DiscordRpc(this);
+        m_rpcTimer.setInterval(5000);
+        connect(&m_rpcTimer, &QTimer::timeout, this, [this] { rpcSync(); });
+        m_rpcTimer.start();
 
         connect(m_player, &QMediaPlayer::playbackStateChanged, this, &MainWindow::onState);
         connect(m_player, &QMediaPlayer::positionChanged, this, &MainWindow::onPosition);
         connect(m_player, &QMediaPlayer::durationChanged, this, &MainWindow::onDuration);
         connect(m_player, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus s) {
-            // a stream that stays stalled is as good as dropped
-            if (s == QMediaPlayer::StalledMedia) m_stall.start(20000); else m_stall.stop();
-
-            if (s == QMediaPlayer::EndOfMedia) {
-                // A stream that was cut short (dropped connection, demuxer hit a truncated file) also ends
-                // "normally". That must not be mistaken for the song being over.
-                if (endedEarly() && recoverStream(QStringLiteral("stream ended early"))) return;
-                onEnded();
-            } else if ((s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) && m_resumeMs > 0) {
-                const qint64 at = m_resumeMs;      // picking up after a reconnect: go back to where we were
-                m_resumeMs = 0;
-                seekTo(at);
-            }
+            if (s == QMediaPlayer::EndOfMedia) onEnded();
         });
-        m_stall.setSingleShot(true);
-        connect(&m_stall, &QTimer::timeout, this, [this] {
-            const Track* t = trackById(m_currentId);
-            if (t && t->online) recoverStream(QStringLiteral("stalled"));
-        });
-        connect(m_player, &QMediaPlayer::metaDataChanged, this, [this] { refreshInfoPanel(); });
-
-        // ---- local relay: stable, seekable, self-healing source for YouTube streams
-        m_relay = new StreamRelay(new QNetworkAccessManager(this), this);
-        connect(m_relay, &StreamRelay::ready, this, [this](quint64 id, const QUrl& local) {
-            if (id == m_relaySess) playUrl(local);
-        });
-        connect(m_relay, &StreamRelay::failed, this, [this](quint64 id, const QString&) {
-            if (id == m_relaySess) playUrl(QUrl(m_directUrl));       // relay unusable: play the URL directly
-        });
-        connect(m_relay, &StreamRelay::upstreamRejected, this, [this](quint64 id) {
-            if (id == m_relaySess) refreshUpstream();                // stream URL expired mid-song
-        });
-
         connect(m_player, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error, const QString& msg) {
-            if (m_player->source().isEmpty()) return;      // late error from a source we already dropped
             const Track* t = trackById(m_currentId);
-            // Dropped / rejected stream: reconnect and carry on from the same spot before giving up.
-            if (t && t->online && recoverStream(msg)) return;
+            // Stream URLs expire / get rejected: re-resolve once before giving up.
+            if (t && t->online && !m_retried && !m_resolving) {
+                m_retried = true;
+                resolveCurrent();
+                return;
+            }
             if (skipUnplayable(msg.isEmpty() ? QStringLiteral("can't be played") : msg)) return;
             m_barArtist->setText(msg.isEmpty() ? QStringLiteral("Can't play this file") : msg);
             if (t && t->online) setOnlineStatus(QStringLiteral("Playback error: ") + msg, true);
@@ -1065,11 +1111,7 @@ private:
         add(QKeySequence(Qt::CTRL | Qt::Key_O), [this] { addFiles(); });
         add(QKeySequence(Qt::CTRL | Qt::Key_N), [this] { createPlaylist(-1); });
         add(QKeySequence(Qt::CTRL | Qt::Key_I), [this] { openImportDialog(); });
-        add(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I), [this] { setInfoWanted(!m_infoWanted); });
-        connect(m_infoBtn, &QAbstractButton::clicked, this, [this] {
-            if (m_currentId < 0 && !m_infoWanted) showToast(QStringLiteral("Play a song to see its info"));
-            setInfoWanted(!m_infoWanted);
-        });
+        add(QKeySequence(Qt::CTRL | Qt::Key_T), [this] { openThemeDialog(); });
         add(QKeySequence(Qt::CTRL | Qt::Key_F), [this] {
             QLineEdit* e = (m_stack->currentIndex() == TabLibrary) ? m_search : m_osearch;
             if (m_stack->currentIndex() == TabPlaylist) showTab(TabHome);
@@ -1077,6 +1119,10 @@ private:
             e->setFocus();
             e->selectAll();
         });
+        // Ctrl+Shift+I: toggle the Now Playing info panel
+        add(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I), [this] { if (m_infoHost) m_infoHost->toggle(); });
+        // Ctrl+L: lyrics
+        add(QKeySequence(Qt::CTRL | Qt::Key_L), [this] { toggleLyrics(); });
     }
 
     void restore()
@@ -1087,8 +1133,6 @@ private:
         m_preMute = v;
         m_volume->setValue(v);
         applyVolume(v);
-        m_infoWanted = s.value("infoPanel", true).toBool();
-        m_infoBtn->setActive(m_infoWanted);
 
         QStringList ok;
         for (const QString& p : s.value("paths").toStringList())
@@ -1111,6 +1155,10 @@ private:
         showTab(TabHome);                       // Home is always the first thing you see
         refreshToolState();
         if (m_yt->available() && !fresh) fetchHome();
+        // Load Deezer chart data for trending songs on the Home page
+        if (m_charts) m_charts->loadHome();
+        // Prune old audio cache entries
+        Yt::pruneAudioCache();
     }
 
     // =====================================================================
@@ -1234,7 +1282,7 @@ private:
 
     void setOnlineStatus(const QString& t, bool error = false)
     {
-        m_oStatus->setStyleSheet(QStringLiteral("font-size:13px;color:%1;background:transparent;")
+        sty(m_oStatus, QStringLiteral("font-size:13px;color:%1;background:transparent;")
                                      .arg(error ? "#ff8a8a" : "#c8c8c8"));
         m_oStatus->setText(t);
         m_oStatus->setVisible(!t.isEmpty());
@@ -1373,6 +1421,39 @@ private:
             return a.section(QLatin1String(", "), 0, 0);
         }
         return QString();
+    }
+
+    void populateChartShelf()
+    {
+        // Adds a "Trending songs" shelf to the Home page from Deezer chart data.
+        if (m_chartSongs.isEmpty() || m_disc.isEmpty()) return;
+        // Find the last discover shelf that has no content and repurpose it.
+        for (int i = int(m_disc.size()) - 1; i >= 0; --i) {
+            if (!m_disc[i]->hasContent()) {
+                QVector<Track> ts;
+                for (const Track& s : m_chartSongs) {
+                    if (ts.size() >= 24) break;
+                    // Chart tracks are "pending": they have a query but no videoId yet.
+                    // Register them in m_known so the player can find them.
+                    int id = m_nextOnlineId++;
+                    Track t = s;
+                    t.id = id;
+                    m_known.emplace(id, t);
+                    ts.push_back(t);
+                }
+                QVector<int> queue;
+                for (const Track& t : ts) queue.push_back(t.id);
+                QList<MediaCard*> cards;
+                for (const Track& t : ts) cards.push_back(makeTrackCard(MediaCard::Card, t, queue));
+                m_disc[i]->setTitle(QStringLiteral("Trending songs"));
+                m_disc[i]->setCards(cards);
+                applyHomeVisibility();
+                // Load thumbnails for chart tracks
+                for (const Track& t : ts)
+                    if (!t.thumbUrl.isEmpty()) m_thumbs->request(t.id, { t.thumbUrl }, 100);
+                break;
+            }
+        }
     }
 
     void fillShelf(Shelf* sh, const QVector<OnlineItem>& items, const QString&)
@@ -1671,7 +1752,6 @@ private:
         refreshCardsFor(r.id);
         if (!m_coverTimer.isActive()) m_coverTimer.start(150);
         if (r.id == m_currentId) refreshNowPlaying();
-        else if (r.id == m_infoNextId) refreshInfoPanel();
     }
 
     // =====================================================================
@@ -2039,6 +2119,23 @@ private:
         else                 handleAddChoice(am, a, id);
     }
 
+    void openThemeDialog()
+    {
+        ThemeDialog dlg(this);
+        dlg.exec();
+    }
+
+    // Widgets that were given fixed colours when they were built follow the theme here.
+    void applyThemeColors()
+    {
+        m_heroPlay->setCircle(Theme::accent());
+        m_plHeroPlay->setCircle(Theme::accent());
+        m_homeBtn->setCircle(Theme::greyAt(0.055), Theme::fg());
+        m_playBtn->setCircle(Theme::fg());
+        m_searchAct->setIcon(searchIcon());
+        update();
+    }
+
     void updateAvatar()
     {
         const bool in = m_google->signedIn();
@@ -2054,6 +2151,7 @@ private:
         QMenu menu(this);
         QAction* imp = nullptr;
         QAction* out = nullptr;
+        QAction* thm = nullptr;
         if (m_google->signedIn()) {
             QString who = m_google->accountName();
             who.replace(QLatin1Char('&'), QStringLiteral("&&"));
@@ -2066,9 +2164,12 @@ private:
         } else {
             imp = menu.addAction(QStringLiteral("Sign in with Google..."));
         }
+        menu.addSeparator();
+        thm = menu.addAction(QStringLiteral("Themes..."));
         QAction* a = menu.exec(m_avatar->mapToGlobal(QPoint(m_avatar->width() - 180, m_avatar->height() + 4)));
         if (!a) return;
         if (a == imp) openImportDialog();
+        else if (a == thm) openThemeDialog();
         else if (a == out) { m_google->signOut(); showToast(QStringLiteral("Signed out of Google")); }
     }
 
@@ -2090,6 +2191,16 @@ private:
     }
 
     void showToast(const QString& text) { m_toast->showMessage(text, 94 + 16); }
+
+    void openSettingsDialog()
+    {
+        if (!m_settingsDialog) {
+            m_settingsDialog = new SettingsDialog(m_google, m_rpc, this);
+        }
+        m_settingsDialog->show();
+        m_settingsDialog->raise();
+        m_settingsDialog->activateWindow();
+    }
 
     // =====================================================================
     //  Library
@@ -2133,7 +2244,6 @@ private:
         if (cur) {
             m_player->stop();
             m_player->setSource(QUrl());
-            resetStreamState();
             m_currentId = -1;
         }
         m_history.removeAll(id);
@@ -2279,16 +2389,12 @@ private:
         setTimeLabel(0);
         m_yt->cancelResolve();
         m_resolving = false;
-        if (m_relaySess || m_connecting) {          // drop the player's source before the relay hangs up on it
-            m_player->stop();
-            m_player->setSource(QUrl());
-        }
-        resetStreamState();
 
         if (online) {
             // Online: stop whatever is playing, then use the stream we already prefetched, or resolve a fresh one.
             m_player->stop();
             m_player->setSource(QUrl());
+            m_retried = false;
             refreshNowPlaying();
             // Upgrade to a high-res square cover for the player bar / now-playing sheet.
             m_thumbs->request(id, { Yt::thumbUrl(videoId, "maxresdefault"),
@@ -2314,8 +2420,6 @@ private:
     // Starts an already-resolved stream URL for the current (online) song.
     void startStream(const QString& url, const OnlineItem& meta)
     {
-        m_stream = meta.stream;
-        m_expectedMs = meta.durationMs;
         // richer metadata straight from the video page (artist / track / album when YouTube Music has them)
         MetaResult r;
         r.id = m_currentId;
@@ -2325,87 +2429,22 @@ private:
         r.durationMs = meta.durationMs;
         applyMetaEverywhere(r);
         setOnlineStatus(QString());
-        openRelay(url);
-    }
 
-    // The player never talks to YouTube directly: it reads from the local relay, which fetches the stream in
-    // small range requests and quietly re-requests anything that fails.  (Direct URL as a fallback.)
-    void openRelay(const QString& url)
-    {
-        m_directUrl = url;
-        m_connecting = true;
-        m_relaySess = m_relay->open(url, m_stream.headers);
-    }
+        // Store stream info on the track for InfoPanel
+        if (Track* t = knownTrack(m_currentId)) {
+            t->webUrl = meta.stream.webUrl;
+        }
+        updateInfoPanel(meta.stream);
 
-    void playUrl(const QUrl& u)
-    {
-        m_connecting = false;
-        m_goodClock.restart();
-        m_player->setSource(u);
-        m_player->play();
-        refreshNowPlaying();
-    }
-
-    // The stream URL expired while playing: get a new one and hand it to the relay (playback never stops).
-    void refreshUpstream()
-    {
-        const Track* t = trackById(m_currentId);
-        if (!t || !t->online || m_resolving || m_relayRefresh || !m_yt->available()) return;
-        m_relayRefresh = true;
-        m_resolveVideo = t->videoId;
-        m_yt->resolve(t->videoId);
-    }
-
-    void resetStreamState()
-    {
-        m_relay->close();
-        m_relaySess = 0;
-        m_connecting = false;
-        m_relayRefresh = false;
-        m_recoverTries = 0;
-        m_resumeMs = 0;
-        m_lastGoodPos = 0;
-        m_expectedMs = 0;
-        m_directUrl.clear();
-        m_stream = StreamInfo();
-        m_stall.stop();
-    }
-
-    // The song "ended" well before its real length: the stream was cut, not finished.
-    bool endedEarly() const
-    {
-        const Track* t = trackById(m_currentId);
-        return t && t->online && m_expectedMs > 0 && m_lastGoodPos < m_expectedMs - 4000;
-    }
-
-    // Reconnects the current YouTube song after a dropped / broken stream and picks up where it was.
-    // First attempt re-uses the stream URL with a fresh connection; later ones ask yt-dlp for a new URL.
-    // Returns false when it should give up (the caller then skips / reports as before).
-    bool recoverStream(const QString& why)
-    {
-        const Track* t = trackById(m_currentId);
-        if (!t || !t->online) return false;
-        if (m_resolving || m_connecting) return true;            // a reconnect is already under way
-        if (m_recoverTries >= kMaxRecover) return false;
-        const bool reuse = (m_recoverTries == 0 && !m_directUrl.isEmpty());
-        if (!reuse && !m_yt->available()) return false;
-
-        ++m_recoverTries;
-        m_stall.stop();
-        m_resumeMs = m_lastGoodPos > 1500 ? m_lastGoodPos : 0;
-        m_barArtist->setText(QStringLiteral("Reconnecting..."));
-        qInfo().noquote() << "[stream] recovering (" << why << ") attempt" << m_recoverTries << "at" << m_resumeMs << "ms";
-        m_player->stop();
-        m_player->setSource(QUrl());
-        if (reuse) { m_relay->close(); openRelay(m_directUrl); }
-        else       { m_relay->close(); m_relaySess = 0; resolveCurrent(); }
-        return true;
+        // Route through the local relay so URL expiry and server throttling are handled transparently.
+        m_relaySession = m_relay->open(url, meta.stream.headers);
+        // relay emits ready() -> player.setSource + play()
+        // fallback: if relay fails, we still get the failed() signal above
     }
 
     // While one song plays, resolve the stream of the one after it so the gap between songs is short.
     void prefetchNext()
     {
-        refreshInfoPanel();                              // "next in queue" may have changed
         if (!m_yt->available()) return;
         const int id = peekNext();
         if (id < 0 || id == m_currentId) return;
@@ -2541,9 +2580,11 @@ private:
     void onEnded()
     {
         if (m_repeat == 2) {
-            m_lastGoodPos = 0;
             m_player->setPosition(0);
             m_player->play();
+            m_lastPos = 0;
+            m_posClock.restart();
+            rpcSync();
             return;
         }
         playNext(true);
@@ -2555,11 +2596,11 @@ private:
         if (dur > 0) ms = qBound<qint64>(0, ms, dur);
         m_player->setPosition(ms);
         m_lastPos = ms;
-        m_lastGoodPos = ms;
         m_posClock.restart();
         m_lastSec = -1;
         setTimeLabel(ms);
         if (dur > 0 && !m_seek->dragging()) m_seek->setValue(qreal(ms) / dur);
+        rpcSync();
     }
 
     qint64 currentDuration() const
@@ -2616,19 +2657,15 @@ private:
         m_playBtn->setPlaying(pl);
         m_sheet->setPlaying(pl);
         markNowPlaying(pl);
-        m_lastPos = m_resumeMs > 0 ? m_resumeMs : m_player->position();
+        m_lastPos = m_player->position();
         m_posClock.restart();
         if (pl) m_ui.start(); else m_ui.stop();
+        rpcSync();
     }
 
     void onPosition(qint64 pos)
     {
         const bool playing = m_player->playbackState() == QMediaPlayer::PlayingState;
-        if (m_resumeMs > 0) return;                       // reconnecting: keep showing where we were
-        if (playing && pos > 0) m_lastGoodPos = pos;
-        // playing steadily for a while earns the reconnect budget back
-        if (playing && m_recoverTries > 0 && m_goodClock.isValid() && m_goodClock.elapsed() > 20000)
-            m_recoverTries = 0;
         const qint64 predicted = m_lastPos + (playing ? m_posClock.elapsed() : 0);
         if (!playing || qAbs(predicted - pos) > 250) {
             m_lastPos = pos;
@@ -2649,6 +2686,46 @@ private:
         m_smodel->setDuration(m_currentId, d);
         m_pmodel->setDuration(m_currentId, d);
         if (Track* t = knownTrack(m_currentId)) t->durationMs = d;
+        rpcSync();
+    }
+
+    // Current song -> Discord. Safe to call as often as you like (identical states are ignored).
+    void rpcSync()
+    {
+        if (!m_rpc) return;
+        const Track* t = (m_currentId >= 0) ? trackById(m_currentId) : nullptr;
+        if (!t) { m_rpcIdle.invalidate(); m_rpc->setTrack(RpcTrack()); return; }
+
+        const auto st = m_player->playbackState();
+        const bool playing = (st == QMediaPlayer::PlayingState);
+        const bool paused  = (st == QMediaPlayer::PausedState);
+        if (playing || paused) {
+            m_rpcIdle.invalidate();
+        } else {
+            // loading the next stream: keep showing the song, but give up if nothing starts for 30 s
+            if (!m_rpcIdle.isValid()) m_rpcIdle.start();
+            if (m_rpcIdle.elapsed() > 30000) { m_rpc->setTrack(RpcTrack()); return; }
+        }
+
+        const qint64 dur = currentDuration();
+        qint64 pos = m_lastPos + (playing ? m_posClock.elapsed() : 0);
+        pos = qMax<qint64>(0, pos);
+        if (dur > 0) pos = qMin(pos, dur);
+
+        RpcTrack r;
+        r.valid = true;
+        r.playing = playing;
+        r.paused = paused;
+        r.title = t->title;
+        r.artist = t->artist;
+        r.album = t->album;
+        r.durationMs = dur;
+        r.positionMs = pos;
+        if (t->online) {
+            r.fallbackImage = !t->thumbUrl.isEmpty() ? t->thumbUrl
+                                                     : Yt::thumbUrl(t->videoId, "mqdefault");
+        }
+        m_rpc->setTrack(r);
     }
 
     // Smooth 60 fps progress: interpolate between the player's coarse updates.
@@ -2661,6 +2738,8 @@ private:
             m_seek->setValue(qreal(pos) / dur);
             setTimeLabel(pos);
         }
+        // Feed current position to the lyrics view for sync highlighting
+        if (m_lyricsView) m_lyricsView->setPosition(pos);
     }
 
     void setTimeLabel(qint64 ms)
@@ -2677,6 +2756,7 @@ private:
         const bool playing = m_player->playbackState() == QMediaPlayer::PlayingState;
         if (!t) m_currentId = -1;
         markNowPlaying(playing);
+        rpcSync();
         if (!t) {
             m_barTitle->setText(QStringLiteral("Nothing playing"));
             m_barArtist->setText(QStringLiteral("Pick a song to start"));
@@ -2689,6 +2769,9 @@ private:
             m_plPage->setTint(Theme::defaultTint());
             m_sheet->closeSheet();
             setWindowTitle(QStringLiteral("Pulsify"));
+            if (m_infoPanel) m_infoPanel->setInfo(SongInfo());
+            m_lyricsKey.clear();
+            if (m_lyricsView) m_lyricsView->setMessage(QString());
             return;
         }
         const QColor tint = t->tint.isValid() ? t->tint : Theme::defaultTint();
@@ -2701,75 +2784,58 @@ private:
         m_sheet->setTrack(t->title, t->artist, t->cover, tint);
         if (t->durationMs > 0) m_timeR->setText(fmtTime(t->durationMs));
         setWindowTitle(QStringLiteral("%1 - %2 - Pulsify").arg(t->title, t->artist));
-        refreshInfoPanel();
-    }
 
-    // =====================================================================
-    //  Song info sidebar
-    // =====================================================================
-    void setInfoWanted(bool on)
-    {
-        m_infoWanted = on;
-        m_infoBtn->setActive(on);
-        updateInfoVisibility();
-    }
+        // Update InfoPanel (keeps the stream details that were already looked up for this song)
+        updateInfoPanel(m_curStreamId == m_currentId ? m_curStream : StreamInfo());
 
-    // Shown when wanted, something is playing and the window is wide enough to leave the page usable.
-    void updateInfoVisibility()
-    {
-        if (!m_info) return;
-        const bool show = m_infoWanted && m_currentId >= 0 && width() >= 1120;
-        if (m_info->isVisibleTo(this) != show) m_info->setVisible(show);
-    }
-
-    void refreshInfoPanel()
-    {
-        if (!m_info) return;
-        updateInfoVisibility();
-        SongInfo s;
-        m_infoNextId = -1;
-        if (const Track* t = trackById(m_currentId)) {
-            s.valid = true;
-            s.online = t->online;
-            s.title = t->title;
-            s.artist = t->artist;
-            s.album = t->album;
-            s.videoId = t->videoId;
-            s.path = t->path;
-            s.durationMs = t->durationMs;
-            s.cover = !t->cover.isNull() ? t->cover : t->thumb;
-            s.tint = t->tint;
-            if (t->online) {
-                s.stream = m_stream;
-            } else {
-                // tags and format as the media backend sees them (available once the file is loaded)
-                const QMediaMetaData md = m_player->metaData();
-                const QVariant codec = md.value(QMediaMetaData::AudioCodec);
-                if (codec.isValid() && codec.toInt() >= 0)
-                    s.codec = QMediaFormat::audioCodecName(QMediaFormat::AudioCodec(codec.toInt()));
-                const QVariant fmt = md.value(QMediaMetaData::FileFormat);
-                if (fmt.isValid() && fmt.toInt() >= 0)
-                    s.format = QMediaFormat::fileFormatName(QMediaFormat::FileFormat(fmt.toInt()));
-                s.bitrateKbps = md.value(QMediaMetaData::AudioBitRate).toInt() / 1000;
-                s.genre = md.stringValue(QMediaMetaData::Genre);
-                const QDateTime d = md.value(QMediaMetaData::Date).toDateTime();
-                if (d.isValid()) s.year = QString::number(d.date().year());
-                const int tn = md.value(QMediaMetaData::TrackNumber).toInt();
-                if (tn > 0) s.trackNo = QString::number(tn);
-            }
-            const int nid = peekNext();
-            if (nid >= 0 && nid != m_currentId) {
-                if (const Track* n = trackById(nid)) {
-                    if (n->online) ensureThumb(nid);
-                    s.hasNext = true;
-                    s.nextTitle = n->title;
-                    s.nextArtist = n->artist;
-                    s.nextCover = !n->cover.isNull() ? n->cover : n->thumb;
-                    m_infoNextId = nid;
-                }
+        // Lyrics: only look them up again when the song or its title / artist changed
+        if (m_lyricsService && m_lyricsView) {
+            const QString key = (t->online ? t->videoId : t->path) + QLatin1Char('|') + t->artist + QLatin1Char('|') + t->title;
+            if (key != m_lyricsKey) {
+                m_lyricsKey = key;
+                m_lyricsView->setMessage(QStringLiteral("Loading lyrics\u2026"));
+                m_lyricsService->fetch(key, t->artist, t->title, t->album, t->durationMs);
             }
         }
-        m_info->setInfo(s);
+    }
+
+    void toggleLyrics()
+    {
+        if (m_currentId < 0) return;
+        if (!m_sheet->isOpen()) m_sheet->openSheet(true);
+        else m_sheet->setLyricsMode(!m_sheet->lyricsMode());
+    }
+
+    void updateInfoPanel(const StreamInfo& stream)
+    {
+        if (!m_infoPanel) return;
+        const Track* t = trackById(m_currentId);
+        if (!t) { m_infoPanel->setInfo(SongInfo()); return; }
+        if (stream.known()) { m_curStream = stream; m_curStreamId = m_currentId; }
+
+        SongInfo info;
+        info.valid = true;
+        info.online = t->online;
+        info.title = t->title;
+        info.artist = t->artist;
+        info.album = t->album;
+        info.videoId = t->videoId;
+        info.path = t->path;
+        info.durationMs = t->durationMs;
+        info.cover = t->cover.isNull() ? t->thumb : t->cover;
+        info.tint = t->tint;
+        info.stream = stream;
+
+        // next in queue
+        const int nextId = peekNext();
+        if (const Track* nt = (nextId >= 0 && nextId != m_currentId) ? trackById(nextId) : nullptr) {
+            info.hasNext = true;
+            info.nextTitle = nt->title;
+            info.nextArtist = nt->artist;
+            info.nextCover = nt->cover.isNull() ? nt->thumb : nt->cover;
+        }
+
+        m_infoPanel->setInfo(info);
     }
 
     // =====================================================================
@@ -2821,6 +2887,8 @@ private:
     QStackedWidget* m_oStack = nullptr;
     IconButton*   m_homeBtn = nullptr;
     AvatarButton* m_avatar = nullptr;
+    QPushButton*  m_themeBtn = nullptr;
+    QAction*      m_searchAct = nullptr;
     QLineEdit*    m_osearch = nullptr;
     QPushButton*  m_refreshBtn = nullptr;
     QLabel*       m_oStatus = nullptr;
@@ -2858,28 +2926,8 @@ private:
     int           m_fetchFails = 0, m_fetchTotal = 0;
     bool          m_cacheDirty = false;
     bool          m_resolving = false;
+    bool          m_retried = false;
     QString       m_resolveVideo;
-
-    // stream relay + recovery (see relay.h)
-    static constexpr int kMaxRecover = 4;            // back-to-back reconnects before giving up on a song
-    StreamRelay*  m_relay = nullptr;
-    quint64       m_relaySess = 0;
-    bool          m_connecting = false;              // waiting for the relay to answer
-    bool          m_relayRefresh = false;            // a resolve is running only to renew the relay's URL
-    QString       m_directUrl;
-    StreamInfo    m_stream;                          // what yt-dlp said about the current stream
-    qint64        m_expectedMs = 0;                  // length yt-dlp reported (to spot streams cut short)
-    qint64        m_lastGoodPos = 0;
-    qint64        m_resumeMs = 0;
-    int           m_recoverTries = 0;
-    QElapsedTimer m_goodClock;
-    QTimer        m_stall;
-
-    // song info sidebar
-    InfoPanel*    m_info = nullptr;
-    IconButton*   m_infoBtn = nullptr;
-    bool          m_infoWanted = true;
-    int           m_infoNextId = -1;
 
     // banner (install / update yt-dlp)
     QFrame*       m_banner = nullptr;
@@ -2928,6 +2976,39 @@ private:
     struct Prefetched { QString url; OnlineItem meta; qint64 when = 0; };
     static constexpr qint64 kStreamTtlSec = 20 * 60;
     QHash<QString, Prefetched> m_prefetched;
+
+    // ---- new feature members ----
+    // Stream relay: local HTTP proxy that handles YouTube URL expiry / throttling
+    StreamRelay*  m_relay = nullptr;
+    quint64       m_relaySession = 0;
+
+    // Now Playing info panel (right sidebar)
+    InfoPanel*    m_infoPanel = nullptr;
+    SlideHost*    m_infoHost = nullptr;
+    IconButton*   m_infoBtn = nullptr;
+    IconButton*   m_lyricsBtn = nullptr;
+    StreamInfo    m_curStream;
+    int           m_curStreamId = -1;
+    QString       m_lyricsKey;
+
+    // Synced lyrics
+    LyricsService* m_lyricsService = nullptr;
+    LyricsView*    m_lyricsView = nullptr;
+    QWidget*       m_lyricsContainer = nullptr;
+
+    // Deezer chart service (trending songs, popular artists/albums)
+    ChartService*     m_charts = nullptr;
+    ImageCache*       m_imgCache = nullptr;
+    QVector<Track>    m_chartSongs;
+    QVector<ChartItem> m_chartArtists, m_chartAlbums;
+
+    // Settings dialog
+    SettingsDialog* m_settingsDialog = nullptr;
+
+    // Discord Rich Presence
+    DiscordRpc*    m_rpc = nullptr;
+    QTimer         m_rpcTimer;
+    QElapsedTimer  m_rpcIdle;
 };
 
 int main(int argc, char* argv[])
@@ -2942,22 +3023,9 @@ int main(int argc, char* argv[])
 #endif
     app.setFont(Theme::font(14));
 
-    QPalette pal;
-    pal.setColor(QPalette::Window, Theme::bg());
-    pal.setColor(QPalette::WindowText, Qt::white);
-    pal.setColor(QPalette::Base, QColor(0x1e, 0x1e, 0x1e));
-    pal.setColor(QPalette::AlternateBase, QColor(0x24, 0x24, 0x24));
-    pal.setColor(QPalette::Text, Qt::white);
-    pal.setColor(QPalette::PlaceholderText, QColor(0x9a, 0x9a, 0x9a));
-    pal.setColor(QPalette::Button, QColor(0x2a, 0x2a, 0x2a));
-    pal.setColor(QPalette::ButtonText, Qt::white);
-    pal.setColor(QPalette::Highlight, Theme::accent());
-    pal.setColor(QPalette::HighlightedText, Qt::black);
-    pal.setColor(QPalette::ToolTipBase, QColor(0x28, 0x28, 0x28));
-    pal.setColor(QPalette::ToolTipText, Qt::white);
-    app.setPalette(pal);
+    Theme::load();
 
-    app.setStyleSheet(
+    Theme::setAppSheet(
         "QScrollBar:vertical{background:transparent;width:14px;margin:0;}"
         "QScrollBar::handle:vertical{background:rgba(255,255,255,0.22);border-radius:4px;min-height:48px;margin:2px 3px;}"
         "QScrollBar::handle:vertical:hover{background:rgba(255,255,255,0.45);}"
@@ -2966,7 +3034,9 @@ int main(int argc, char* argv[])
         "QMenu{background:#282828;color:white;border:1px solid #3a3a3a;padding:6px;}"
         "QMenu::item{padding:8px 24px;border-radius:4px;}"
         "QMenu::item:selected{background:#3d3d3d;}"
-        "QMenu::separator{height:1px;background:#3a3a3a;margin:6px 8px;}");
+        "QMenu::separator{height:1px;background:#3a3a3a;margin:6px 8px;}"
+        "QToolTip{background:#282828;color:white;border:1px solid #3a3a3a;padding:4px 8px;}");
+    Theme::apply();
 
     MainWindow w;
     w.show();

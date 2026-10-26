@@ -47,13 +47,13 @@ public:
         auto* hdr = new QHBoxLayout;
         hdr->setContentsMargins(18, 14, 10, 4);
         auto* ht = new QLabel(QStringLiteral("Now playing"));
-        ht->setStyleSheet(QStringLiteral("font-size:15px;font-weight:700;color:white;background:transparent;"));
+        sty(ht, QStringLiteral("font-size:15px;font-weight:700;color:white;background:transparent;"));
         auto* close = new QPushButton(QStringLiteral("\u2715"));
         close->setCursor(Qt::PointingHandCursor);
         close->setFocusPolicy(Qt::NoFocus);
         close->setFixedSize(30, 30);
         close->setToolTip(QStringLiteral("Hide (Ctrl+Shift+I)"));
-        close->setStyleSheet(QStringLiteral(
+        sty(close, QStringLiteral(
             "QPushButton{background:transparent;color:#b3b3b3;border:none;border-radius:15px;font-size:13px;}"
             "QPushButton:hover{background:rgba(255,255,255,0.14);color:white;}"));
         hdr->addWidget(ht, 1);
@@ -71,7 +71,7 @@ public:
         m_empty = new QLabel(QStringLiteral("Nothing playing yet.\nPlay a song to see its details here."));
         m_empty->setAlignment(Qt::AlignCenter);
         m_empty->setWordWrap(true);
-        m_empty->setStyleSheet(QStringLiteral("color:#8a8a8a;font-size:13px;background:transparent;padding:60px 10px;"));
+        sty(m_empty, QStringLiteral("color:#8a8a8a;font-size:13px;background:transparent;padding:60px 10px;"));
         bv->addWidget(m_empty);
 
         m_content = new QWidget;
@@ -89,11 +89,11 @@ public:
         m_title = new QLabel;
         m_title->setWordWrap(true);
         m_title->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        m_title->setStyleSheet(QStringLiteral("font-size:22px;font-weight:800;color:white;background:transparent;"));
+        sty(m_title, QStringLiteral("font-size:22px;font-weight:800;color:white;background:transparent;"));
         m_artist = new QLabel;
         m_artist->setWordWrap(true);
         m_artist->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        m_artist->setStyleSheet(QStringLiteral("font-size:14px;font-weight:600;color:#c4c4c4;background:transparent;"));
+        sty(m_artist, QStringLiteral("font-size:14px;font-weight:600;color:#c4c4c4;background:transparent;"));
         cv->addWidget(m_title);
         cv->addSpacing(2);
         cv->addWidget(m_artist);
@@ -119,7 +119,7 @@ public:
         // next in queue
         m_nextCard = new QFrame;
         m_nextCard->setObjectName(QStringLiteral("card"));
-        m_nextCard->setStyleSheet(cardStyle());
+        sty(m_nextCard, cardStyle());
         auto* nv = new QVBoxLayout(m_nextCard);
         nv->setContentsMargins(14, 12, 14, 12);
         nv->setSpacing(8);
@@ -256,7 +256,7 @@ private:
     {
         auto* l = new QLabel(t);
         l->setObjectName(QStringLiteral("heading"));
-        l->setStyleSheet(QStringLiteral("font-size:13px;font-weight:700;color:#b3b3b3;background:transparent;"));
+        sty(l, QStringLiteral("font-size:13px;font-weight:700;color:#b3b3b3;background:transparent;"));
         return l;
     }
 
@@ -266,7 +266,7 @@ private:
         b->setCursor(Qt::PointingHandCursor);
         b->setFocusPolicy(Qt::NoFocus);
         b->setFixedHeight(30);
-        b->setStyleSheet(QStringLiteral(
+        sty(b, QStringLiteral(
             "QPushButton{background:rgba(255,255,255,0.12);color:white;border:none;border-radius:15px;"
             "padding:0 14px;font-size:12px;font-weight:700;}"
             "QPushButton:hover{background:rgba(255,255,255,0.22);}"));
@@ -278,7 +278,7 @@ private:
     {
         auto* card = new QFrame;
         card->setObjectName(QStringLiteral("card"));
-        card->setStyleSheet(cardStyle());
+        sty(card, cardStyle());
         auto* v = new QVBoxLayout(card);
         v->setContentsMargins(14, 12, 14, 12);
         v->setSpacing(8);
@@ -311,11 +311,11 @@ private:
         auto* k = new QLabel(key);
         k->setFixedWidth(76);
         k->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-        k->setStyleSheet(QStringLiteral("font-size:12px;color:#9a9a9a;background:transparent;"));
+        sty(k, QStringLiteral("font-size:12px;color:#9a9a9a;background:transparent;"));
         auto* v = new QLabel(value);
         v->setWordWrap(true);
         v->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        v->setStyleSheet(QStringLiteral("font-size:13px;color:white;background:transparent;"));
+        sty(v, QStringLiteral("font-size:13px;color:white;background:transparent;"));
         h->addWidget(k, 0, Qt::AlignTop);
         h->addWidget(v, 1);
         rows->addWidget(row);
@@ -367,4 +367,65 @@ private:
     CoverView*   m_nextCover = nullptr;
     ElidedLabel *m_nextTitle = nullptr, *m_nextArtist = nullptr;
     QString      m_key;
+};
+
+
+// ============================================================================
+//  SlideHost: holds the InfoPanel and slides it in from the right edge.
+//  The host's width is animated (so the pages next to it glide aside) while the
+//  panel keeps its full width and is simply revealed, so its content never reflows.
+// ============================================================================
+class SlideHost : public QWidget
+{
+    Q_OBJECT
+public:
+    SlideHost(QWidget* inner, int fullWidth, QWidget* parent = nullptr)
+        : QWidget(parent), m_inner(inner), m_full(fullWidth)
+    {
+        setAttribute(Qt::WA_TranslucentBackground);
+        m_inner->setParent(this);
+        m_inner->setFixedWidth(m_full);
+        m_inner->show();
+        setFixedWidth(0);
+        hide();
+        connect(&m_t, &Tween::changed, this, [this] { apply(); });
+    }
+
+    bool isOpen() const { return m_t.target() > 0.5; }
+
+    void setOpen(bool on)
+    {
+        if (on == isOpen() && (on ? isVisible() : !isVisible())) return;
+        if (on) {
+            show();
+            m_t.to(1.0, 420, QEasingCurve::OutCubic);
+        } else {
+            m_t.to(0.0, 320, QEasingCurve::InOutCubic);
+        }
+        emit openChanged(on);
+    }
+    void toggle() { setOpen(!isOpen()); }
+
+signals:
+    void openChanged(bool open);
+
+protected:
+    void resizeEvent(QResizeEvent* e) override
+    {
+        QWidget::resizeEvent(e);
+        apply();
+    }
+
+private:
+    void apply()
+    {
+        const int w = int(std::round(m_full * qBound(0.0, m_t.value(), 1.0)));
+        if (w != width()) setFixedWidth(w);
+        m_inner->setGeometry(w - m_full, 0, m_full, height());      // slides in from the right edge
+        if (w <= 0 && m_t.target() == 0.0 && isVisible()) hide();
+    }
+
+    QWidget* m_inner;
+    int      m_full;
+    Tween    m_t{this, 0.0};
 };
